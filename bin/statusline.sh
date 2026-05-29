@@ -61,22 +61,32 @@ build_bar() {
     printf "${bar_color}${filled_str}${dim}${empty_str}${reset}"
 }
 
-iso_to_epoch() {
-    local iso_str="$1"
+# Accept BOTH an all-digits epoch (stdin's resets_at / session start) and an
+# ISO-8601 string (the API's resets_at). Returns epoch seconds, non-zero on fail.
+to_epoch() {
+    local val="$1"
+    [ -z "$val" ] || [ "$val" = "null" ] && return 1
 
+    # Pure epoch seconds (stdin schema) — return as-is.
+    if [[ "$val" =~ ^[0-9]+$ ]]; then
+        echo "$val"
+        return 0
+    fi
+
+    # ISO string (API schema). GNU date first.
     local epoch
-    epoch=$(date -d "${iso_str}" +%s 2>/dev/null)
+    epoch=$(date -d "${val}" +%s 2>/dev/null)
     if [ -n "$epoch" ]; then
         echo "$epoch"
         return 0
     fi
 
-    local stripped="${iso_str%%.*}"
+    local stripped="${val%%.*}"
     stripped="${stripped%%Z}"
     stripped="${stripped%%+*}"
     stripped="${stripped%%-[0-9][0-9]:[0-9][0-9]}"
 
-    if [[ "$iso_str" == *"Z"* ]] || [[ "$iso_str" == *"+00:00"* ]] || [[ "$iso_str" == *"-00:00"* ]]; then
+    if [[ "$val" == *"Z"* ]] || [[ "$val" == *"+00:00"* ]] || [[ "$val" == *"-00:00"* ]]; then
         epoch=$(env TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
     else
         epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
@@ -96,7 +106,7 @@ format_reset_time() {
     [ -z "$iso_str" ] || [ "$iso_str" = "null" ] && return
 
     local epoch
-    epoch=$(iso_to_epoch "$iso_str")
+    epoch=$(to_epoch "$iso_str")
     [ -z "$epoch" ] && return
 
     local result=""
@@ -161,7 +171,7 @@ fi
 session_duration=""
 session_start=$(echo "$input" | jq -r '.session.start_time // empty')
 if [ -n "$session_start" ] && [ "$session_start" != "null" ]; then
-    start_epoch=$(iso_to_epoch "$session_start")
+    start_epoch=$(to_epoch "$session_start")
     if [ -n "$start_epoch" ]; then
         now_epoch=$(date +%s)
         elapsed=$(( now_epoch - start_epoch ))
@@ -240,73 +250,180 @@ get_oauth_token() {
     echo ""
 }
 
-# ── Fetch usage data (cached) ──────────────────────────
-cache_file="/tmp/claude/statusline-usage-cache.json"
-cache_max_age=600
-mkdir -p /tmp/claude
+# ════════════════════════════════════════════════════════
+#  DATA SOURCING LAYER
+#
+#  5h / 7d  : stdin-first. Claude Code v2.1.80+ ships rate-limit data in the
+#             stdin JSON (.rate_limits.{five_hour,seven_day}.{used_percentage,
+#             resets_at}); resets_at is Unix epoch seconds. Zero network, no
+#             cache, immune to 429. Falls back to the API cache when stdin
+#             lacks rate_limits (first render of a session, or CC < 2.1.80).
+#  extra    : API/cache only — not present in the stdin payload.
+#  refresh  : single-flight via an mkdir lock, so with N concurrent sessions
+#             exactly ONE invocation performs the curl per api_ttl window; the
+#             rest serve cache/stdin instantly (stale-while-revalidate). The
+#             hot path NEVER blocks on the network.
+# ════════════════════════════════════════════════════════
 
-needs_refresh=true
-usage_data=""
+# ── Configurable paths / knobs (env-overridable for tuning) ──
+cache_dir="${STATUSLINE_CACHE_DIR:-/tmp/claude}"
+cache_file="${cache_dir}/statusline-usage-cache.json"
+lock_dir="${cache_dir}/statusline-refresh.lock"
+api_ttl="${STATUSLINE_API_TTL:-900}"          # 15 min — extra_usage changes slowly
+lock_maxage="${STATUSLINE_LOCK_MAXAGE:-30}"   # reclaim a lock held longer than this
+ua_version="${STATUSLINE_UA_VERSION:-2.1.156}"
+mkdir -p "$cache_dir"
 
-if [ -f "$cache_file" ]; then
-    cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)
-    now=$(date +%s)
-    cache_age=$(( now - cache_mtime ))
-    if [ "$cache_age" -lt "$cache_max_age" ]; then
-        needs_refresh=false
-        usage_data=$(cat "$cache_file" 2>/dev/null)
-    fi
-fi
+# mtime in epoch seconds, portable (GNU stat -c, then BSD stat -f).
+file_mtime() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
 
-if $needs_refresh; then
+# Atomic cache write: temp-then-mv in the SAME dir (same filesystem → atomic
+# rename), so a concurrent reader never sees a truncated file.
+write_cache_atomic() {
+    local payload="$1" tmp
+    tmp="${cache_file}.tmp.$$.${RANDOM}"
+    printf '%s' "$payload" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    mv -f "$tmp" "$cache_file" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    return 0
+}
+
+# Fetch the raw oauth/usage JSON on stdout. Returns non-zero without a token.
+do_fetch() {
+    local token
     token=$(get_oauth_token)
-    if [ -n "$token" ] && [ "$token" != "null" ]; then
-        response=$(curl -s --max-time 5 \
-            -H "Accept: application/json" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $token" \
-            -H "anthropic-beta: oauth-2025-04-20" \
-            -H "User-Agent: claude-code/2.1.34" \
-            "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-        if [ -n "$response" ] && echo "$response" | jq -e '.five_hour' >/dev/null 2>&1; then
-            usage_data="$response"
-            echo "$response" > "$cache_file"
+    [ -z "$token" ] || [ "$token" = "null" ] && return 1
+    curl -s --max-time 5 \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        -H "User-Agent: claude-code/${ua_version}" \
+        "https://api.anthropic.com/api/oauth/usage" 2>/dev/null
+}
+
+# Single-flight: acquire an atomic mkdir lock, fetch, write cache, release.
+# Returns 0 if THIS process did the refresh; 1 if another holds a live lock.
+refresh_singleflight() {
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+        # Lock exists. A lock the winner JUST created may not have its PID
+        # written yet — so a GRACE window treats a young lock as live
+        # regardless of PID (without it, N losers would all tear down the
+        # winner's fresh lock and each fetch — a PID-file TOCTOU). Past grace
+        # we consult PID liveness; lock_maxage is the final backstop for a
+        # hung / PID-less / PID-reused holder.
+        local now lmtime lock_age grace owner_pid reclaim=0
+        now=$(date +%s)
+        lmtime=$(file_mtime "$lock_dir"); [ -z "$lmtime" ] && lmtime=$now
+        lock_age=$(( now - lmtime ))
+        grace=3; [ "$grace" -gt "$lock_maxage" ] && grace="$lock_maxage"
+
+        [ "$lock_age" -lt "$grace" ] && return 1   # young lock → live winner
+
+        owner_pid=$(cat "${lock_dir}/pid" 2>/dev/null)
+        if [ -n "$owner_pid" ] && [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
+            kill -0 "$owner_pid" 2>/dev/null || reclaim=1
+        fi
+        [ "$lock_age" -ge "$lock_maxage" ] && reclaim=1
+
+        if [ "$reclaim" -eq 1 ]; then
+            rm -rf "$lock_dir" 2>/dev/null
+            mkdir "$lock_dir" 2>/dev/null || return 1   # lost the reclaim race
+        else
+            return 1
         fi
     fi
-    if [ -z "$usage_data" ] && [ -f "$cache_file" ]; then
-        usage_data=$(cat "$cache_file" 2>/dev/null)
+
+    # We hold the lock. Stamp our PID FIRST so racing peers past grace see a
+    # live owner, then fetch and (only on a valid response) atomically cache.
+    printf '%s' "$$" > "${lock_dir}/pid" 2>/dev/null
+    local resp
+    resp=$(do_fetch)
+    if [ -n "$resp" ] && echo "$resp" | jq -e '.five_hour' >/dev/null 2>&1; then
+        write_cache_atomic "$resp"
     fi
+    rm -rf "$lock_dir" 2>/dev/null
+    return 0
+}
+
+# Kick a refresh in the background (detached, output redirected) so the hot
+# path serves stale this render and picks up fresh data next render.
+trigger_refresh() {
+    ( refresh_singleflight >/dev/null 2>&1 & ) >/dev/null 2>&1
+}
+
+# ── Load whatever cache we have (extra_usage always; 5h/7d fallback) ──
+cache_data=""
+if [ -f "$cache_file" ]; then
+    cache_data=$(cat "$cache_file" 2>/dev/null)
+    echo "$cache_data" | jq -e . >/dev/null 2>&1 || cache_data=""
+fi
+
+# ── Is the API cache stale? ──
+api_cache_stale=true
+if [ -f "$cache_file" ]; then
+    cmtime=$(file_mtime "$cache_file"); now=$(date +%s)
+    [ -n "$cmtime" ] && [ "$(( now - cmtime ))" -lt "$api_ttl" ] && api_cache_stale=false
+fi
+
+# ── Does stdin carry rate_limits (CC ≥ 2.1.80)? ──
+stdin_has_rl=false
+if echo "$input" | jq -e '.rate_limits.five_hour.used_percentage != null' >/dev/null 2>&1; then
+    stdin_has_rl=true
+fi
+
+# ── Refresh decision: API cache stale, or stdin can't cover 5h/7d and we
+#    have no usable cache. Always non-blocking (single-flighted in the bg). ──
+if $api_cache_stale || { ! $stdin_has_rl && [ -z "$cache_data" ]; }; then
+    trigger_refresh
+fi
+
+# ── Resolve 5h / 7d: stdin-first, then API-cache fallback ──
+five_pct=""; five_reset=""; seven_pct=""; seven_reset=""
+if $stdin_has_rl; then
+    five_pct=$(echo "$input"   | jq -r '.rate_limits.five_hour.used_percentage // empty')
+    five_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
+    seven_pct=$(echo "$input"  | jq -r '.rate_limits.seven_day.used_percentage // empty')
+    seven_reset=$(echo "$input"| jq -r '.rate_limits.seven_day.resets_at // empty')
+fi
+if [ -n "$cache_data" ]; then
+    [ -z "$five_pct" ]    && five_pct=$(echo "$cache_data"   | jq -r '.five_hour.utilization // empty')
+    [ -z "$five_reset" ]  && five_reset=$(echo "$cache_data" | jq -r '.five_hour.resets_at // empty')
+    [ -z "$seven_pct" ]   && seven_pct=$(echo "$cache_data"  | jq -r '.seven_day.utilization // empty')
+    [ -z "$seven_reset" ] && seven_reset=$(echo "$cache_data"| jq -r '.seven_day.resets_at // empty')
 fi
 
 # ── Rate limit lines ────────────────────────────────────
 rate_lines=""
+bar_width=10
 
-if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-    bar_width=10
+if [ -n "$five_pct" ]; then
+    five_n=$(echo "$five_pct" | awk '{printf "%.0f", $1}')
+    five_reset_fmt=$(format_reset_time "$five_reset" "time")
+    five_bar=$(build_bar "$five_n" "$bar_width")
+    five_color=$(color_for_pct "$five_n")
+    five_fmt=$(printf "%3d" "$five_n")
+    rate_lines+="${white}current${reset} ${five_bar} ${five_color}${five_fmt}%${reset} ${dim}⟳${reset} ${white}${five_reset_fmt}${reset}"
+fi
 
-    five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
-    five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
-    five_hour_reset=$(format_reset_time "$five_hour_reset_iso" "time")
-    five_hour_bar=$(build_bar "$five_hour_pct" "$bar_width")
-    five_hour_pct_color=$(color_for_pct "$five_hour_pct")
-    five_hour_pct_fmt=$(printf "%3d" "$five_hour_pct")
+if [ -n "$seven_pct" ]; then
+    seven_n=$(echo "$seven_pct" | awk '{printf "%.0f", $1}')
+    seven_reset_fmt=$(format_reset_time "$seven_reset" "datetime")
+    seven_bar=$(build_bar "$seven_n" "$bar_width")
+    seven_color=$(color_for_pct "$seven_n")
+    seven_fmt=$(printf "%3d" "$seven_n")
+    [ -n "$rate_lines" ] && rate_lines+="\n"
+    rate_lines+="${white}weekly${reset}  ${seven_bar} ${seven_color}${seven_fmt}%${reset} ${dim}⟳${reset} ${white}${seven_reset_fmt}${reset}"
+fi
 
-    rate_lines+="${white}current${reset} ${five_hour_bar} ${five_hour_pct_color}${five_hour_pct_fmt}%${reset} ${dim}⟳${reset} ${white}${five_hour_reset}${reset}"
-
-    seven_day_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
-    seven_day_reset_iso=$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty')
-    seven_day_reset=$(format_reset_time "$seven_day_reset_iso" "datetime")
-    seven_day_bar=$(build_bar "$seven_day_pct" "$bar_width")
-    seven_day_pct_color=$(color_for_pct "$seven_day_pct")
-    seven_day_pct_fmt=$(printf "%3d" "$seven_day_pct")
-
-    rate_lines+="\n${white}weekly${reset}  ${seven_day_bar} ${seven_day_pct_color}${seven_day_pct_fmt}%${reset} ${dim}⟳${reset} ${white}${seven_day_reset}${reset}"
-
-    extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
+# ── extra_usage (API/cache only — not in stdin) ─────────
+if [ -n "$cache_data" ]; then
+    extra_enabled=$(echo "$cache_data" | jq -r '.extra_usage.is_enabled // false')
     if [ "$extra_enabled" = "true" ]; then
-        extra_pct=$(echo "$usage_data" | jq -r '.extra_usage.utilization // 0' | awk '{printf "%.0f", $1}')
-        extra_used=$(echo "$usage_data" | jq -r '.extra_usage.used_credits // 0' | awk '{printf "%.2f", $1/100}')
-        extra_limit=$(echo "$usage_data" | jq -r '.extra_usage.monthly_limit // 0' | awk '{printf "%.2f", $1/100}')
+        extra_pct=$(echo "$cache_data" | jq -r '.extra_usage.utilization // 0' | awk '{printf "%.0f", $1}')
+        extra_used=$(echo "$cache_data" | jq -r '.extra_usage.used_credits // 0' | awk '{printf "%.2f", $1/100}')
+        extra_limit=$(echo "$cache_data" | jq -r '.extra_usage.monthly_limit // 0' | awk '{printf "%.2f", $1/100}')
         extra_bar=$(build_bar "$extra_pct" "$bar_width")
         extra_pct_color=$(color_for_pct "$extra_pct")
 
@@ -316,7 +433,8 @@ if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
         fi
 
         extra_col="${white}extra${reset}   ${extra_bar} ${extra_pct_color}\$${extra_used}${dim}/${reset}${white}\$${extra_limit}${reset} ${dim}⟳${reset} ${white}${extra_reset}${reset}"
-        rate_lines+="\n${extra_col}"
+        [ -n "$rate_lines" ] && rate_lines+="\n"
+        rate_lines+="${extra_col}"
     fi
 fi
 
