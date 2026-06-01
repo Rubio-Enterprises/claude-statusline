@@ -23,9 +23,13 @@ yellow='\033[33m'
 white='\033[37m'
 magenta='\033[35m'
 dim='\033[2m'
-reset='\033[0m'
+reset='\033[m'
 
-sep=" ${dim}│${reset} "
+# Keep separator escape-free: Claude Code's statusline renderer truncates
+# by raw byte count without subtracting ANSI escape widths, so on narrow
+# terminals every saved byte pushes the truncation cliff further right.
+# The separator inherits the surrounding fg color (default after reset).
+sep=" │ "
 
 # ── Helpers ─────────────────────────────────────────────
 format_tokens() {
