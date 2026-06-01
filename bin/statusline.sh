@@ -9,14 +9,19 @@ if [ -z "$input" ]; then
 fi
 
 # ── Colors ──────────────────────────────────────────────
-blue='\033[38;2;0;153;255m'
-orange='\033[38;2;255;176;85m'
-green='\033[38;2;0;175;80m'
-cyan='\033[38;2;86;182;194m'
-red='\033[38;2;255;85;85m'
-yellow='\033[38;2;230;200;0m'
-white='\033[38;2;220;220;220m'
-magenta='\033[38;2;180;140;255m'
+# Use ANSI palette codes (not 24-bit truecolor) so the statusline adapts
+# to whichever terminal theme is active — readable on both light and dark
+# backgrounds without per-theme hardcoding. Orange has no ANSI slot, so it
+# falls back to bright yellow (slot 11), which renders as orange-ish in
+# most palettes.
+blue='\033[34m'
+orange='\033[93m'
+green='\033[32m'
+cyan='\033[36m'
+red='\033[31m'
+yellow='\033[33m'
+white='\033[37m'
+magenta='\033[35m'
 dim='\033[2m'
 reset='\033[0m'
 
