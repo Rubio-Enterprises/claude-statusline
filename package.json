@@ -12,5 +12,12 @@
     "cli"
   ],
   "license": "MIT",
-  "author": "Kamran Ahmed"
+  "author": "Kamran Ahmed",
+  "scripts": {
+    "lint": "biome check .",
+    "test": "echo \"no automated tests — statusline is a bash + install-shim CLI\" && exit 0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15"
+  }
 }
