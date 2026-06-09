@@ -141,10 +141,18 @@ format_reset_time() {
 }
 
 # ── Extract JSON data ───────────────────────────────────
-# Shorten the display name to an id-like token: lowercase, bracket the
-# "(1M context)" suffix as "[1m]", and hyphenate the remaining spaces/dots.
+# Shorten the display name to an id-like token: lowercase, split off a
+# "(… context)" suffix as "[…]" first (so dots inside the size survive, e.g.
+# 1.5M → [1.5m]), then hyphenate the spaces/dots in the remaining name.
 # "Opus 4.8 (1M context)" → "opus-4-8[1m]"; "Opus 4.8" → "opus-4-8".
-model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"' | tr '[:upper:]' '[:lower:]' | sed -E 's/ *\(([^ )]*) context\)/[\1]/; s/[ .]/-/g')
+model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"' | tr '[:upper:]' '[:lower:]')
+model_ctx=""
+ctx_re='\(([^[:space:])]+)[[:space:]]context\)$'
+if [[ "$model_name" =~ $ctx_re ]]; then
+  model_ctx="[${BASH_REMATCH[1]}]"
+  model_name=${model_name%%(*}
+fi
+model_name="$(echo "$model_name" | sed -E 's/[[:space:]]+$//; s/[ .]/-/g')${model_ctx}"
 
 size=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
 [ "$size" -eq 0 ] 2>/dev/null && size=200000
@@ -184,6 +192,9 @@ git_branch=""
 git_status_markers=""
 if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
+  # Detached HEAD: symbolic-ref is empty, so fall back to the short SHA — this
+  # also un-gates the status markers below, which key off a non-empty branch.
+  [ -z "$git_branch" ] && git_branch=$(git -C "$cwd" rev-parse --short HEAD 2>/dev/null)
 
   # Ahead/behind vs upstream (output: "<behind>\t<ahead>"); listed first so
   # the cluster reads (branch ↑N ↓N +S ~M ?U !C). Empty when no upstream.
