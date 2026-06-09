@@ -61,8 +61,11 @@ color_for_pct() {
 # model_name (sourced live from Claude Code's own .model.display_name). Substring
 # match also covers legacy claude-3-* ids; the "Claude" default and any
 # non-Anthropic model fall through to white as an "unrecognized" signal.
+# fable is the top-of-the-line flagship → bright red (slot 9) so it stands out
+# above opus's magenta; cases are ordered by tier, highest first.
 color_for_model() {
   case "$1" in
+  *fable*) printf '%b' "$bred" ;;
   *opus*) printf '%b' "$magenta" ;;
   *sonnet*) printf '%b' "$blue" ;;
   *haiku*) printf '%b' "$cyan" ;;
