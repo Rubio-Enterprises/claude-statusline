@@ -202,8 +202,8 @@ if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   ab=$(git -C "$cwd" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)
   if [ -n "$ab" ]; then
     read -r behind ahead <<<"$ab"
-    [ "${ahead:-0}" -gt 0 ] && git_status_markers+=" ${green}↑${ahead}${reset}"
-    [ "${behind:-0}" -gt 0 ] && git_status_markers+=" ${red}↓${behind}${reset}"
+    [ "${ahead:-0}" -gt 0 ] && git_status_markers+=" ${cyan}↑${ahead}${reset}"
+    [ "${behind:-0}" -gt 0 ] && git_status_markers+=" ${blue}↓${behind}${reset}"
   fi
 
   # Tally working-tree state from porcelain v1 ("XY path"). A file can be both
@@ -226,9 +226,9 @@ if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       esac
     done <<<"$porcelain"
     [ "$n_staged" -gt 0 ] && git_status_markers+=" ${green}+${n_staged}${reset}"
-    [ "$n_modified" -gt 0 ] && git_status_markers+=" ${red}~${n_modified}${reset}"
+    [ "$n_modified" -gt 0 ] && git_status_markers+=" ${yellow}~${n_modified}${reset}"
     [ "$n_untracked" -gt 0 ] && git_status_markers+=" ${dim}?${n_untracked}${reset}"
-    [ "$n_conflict" -gt 0 ] && git_status_markers+=" ${magenta}!${n_conflict}${reset}"
+    [ "$n_conflict" -gt 0 ] && git_status_markers+=" ${red}!${n_conflict}${reset}"
   fi
 fi
 
@@ -255,11 +255,11 @@ line1+="${pct_color}${pct_used}%${reset}"
 line1+="${sep}"
 case "$effort" in
 low) line1+="${dim}⠄ ${effort}${reset}" ;;
-medium) line1+="${dim}⠆ ${effort}${reset}" ;;
-high) line1+="${magenta}⠦ ${effort}${reset}" ;;
-xhigh) line1+="${red}⠶ ${effort}${reset}" ;;
+medium) line1+="${yellow}⠆ ${effort}${reset}" ;;
+high) line1+="${green}⠦ ${effort}${reset}" ;;
+xhigh) line1+="${magenta}⠶ ${effort}${reset}" ;;
 max) line1+="${bred}⠿ ${effort}${reset}" ;;
-ultracode) line1+="${bred}◆ ${effort}${reset}" ;;
+ultracode) line1+="${blue}◆ ${effort}${reset}" ;;
 auto) line1+="${cyan}◎ ${effort}${reset}" ;;
 *) line1+="${dim}⠆ ${effort}${reset}" ;;
 esac
