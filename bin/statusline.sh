@@ -19,6 +19,7 @@ orange='\033[93m'
 green='\033[32m'
 cyan='\033[36m'
 red='\033[31m'
+bred='\033[91m' # bright red (slot 9) — top effort tier
 yellow='\033[33m'
 white='\033[37m'
 magenta='\033[35m'
@@ -253,10 +254,14 @@ line1+="${sep}"
 line1+="${pct_color}${pct_used}%${reset}"
 line1+="${sep}"
 case "$effort" in
-high) line1+="${magenta}● ${effort}${reset}" ;;
-medium) line1+="${dim}◑ ${effort}${reset}" ;;
-low) line1+="${dim}◔ ${effort}${reset}" ;;
-*) line1+="${dim}◑ ${effort}${reset}" ;;
+low) line1+="${dim}⠄ ${effort}${reset}" ;;
+medium) line1+="${dim}⠆ ${effort}${reset}" ;;
+high) line1+="${magenta}⠦ ${effort}${reset}" ;;
+xhigh) line1+="${red}⠶ ${effort}${reset}" ;;
+max) line1+="${bred}⠿ ${effort}${reset}" ;;
+ultracode) line1+="${bred}◆ ${effort}${reset}" ;;
+auto) line1+="${cyan}◎ ${effort}${reset}" ;;
+*) line1+="${dim}⠆ ${effort}${reset}" ;;
 esac
 line1+="${sep}"
 line1+="${cyan}${dirname}${reset}"
@@ -321,7 +326,6 @@ get_oauth_token() {
 #             resets_at}); resets_at is Unix epoch seconds. Zero network, no
 #             cache, immune to 429. Falls back to the API cache when stdin
 #             lacks rate_limits (first render of a session, or CC < 2.1.80).
-#  extra    : API/cache only — not present in the stdin payload.
 #  refresh  : single-flight via an mkdir lock, so with N concurrent sessions
 #             exactly ONE invocation performs the curl per api_ttl window; the
 #             rest serve cache/stdin instantly (stale-while-revalidate). The
@@ -332,7 +336,7 @@ get_oauth_token() {
 cache_dir="${STATUSLINE_CACHE_DIR:-/tmp/claude}"
 cache_file="${cache_dir}/statusline-usage-cache.json"
 lock_dir="${cache_dir}/statusline-refresh.lock"
-api_ttl="${STATUSLINE_API_TTL:-900}"        # 15 min — extra_usage changes slowly
+api_ttl="${STATUSLINE_API_TTL:-900}"        # 15 min — 5h/7d cache-fallback TTL
 lock_maxage="${STATUSLINE_LOCK_MAXAGE:-30}" # reclaim a lock held longer than this
 ua_version="${STATUSLINE_UA_VERSION:-2.1.156}"
 mkdir -p "$cache_dir"
@@ -424,7 +428,7 @@ trigger_refresh() {
   (refresh_singleflight >/dev/null 2>&1 &) >/dev/null 2>&1
 }
 
-# ── Load whatever cache we have (extra_usage always; 5h/7d fallback) ──
+# ── Load whatever cache we have (5h/7d fallback) ──
 cache_data=""
 if [ -f "$cache_file" ]; then
   cache_data=$(cat "$cache_file" 2>/dev/null)
@@ -488,27 +492,6 @@ if [ -n "$seven_pct" ]; then
   seven_color=$(color_for_pct "$seven_n")
   [ -n "$rate_lines" ] && rate_lines+="${sep}"
   rate_lines+="${white}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${dim}⟳${reset} ${white}${seven_reset_fmt}${reset}"
-fi
-
-# ── extra_usage (API/cache only — not in stdin) ─────────
-if [ -n "$cache_data" ]; then
-  extra_enabled=$(echo "$cache_data" | jq -r '.extra_usage.is_enabled // false')
-  if [ "$extra_enabled" = "true" ]; then
-    extra_pct=$(echo "$cache_data" | jq -r '.extra_usage.utilization // 0' | awk '{printf "%.0f", $1}')
-    extra_used=$(echo "$cache_data" | jq -r '.extra_usage.used_credits // 0' | awk '{printf "%.2f", $1/100}')
-    extra_limit=$(echo "$cache_data" | jq -r '.extra_usage.monthly_limit // 0' | awk '{printf "%.2f", $1/100}')
-    extra_bar=$(build_bar "$extra_pct" "$bar_width")
-    extra_pct_color=$(color_for_pct "$extra_pct")
-
-    extra_reset=$(date -v+1m -v1d +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    if [ -z "$extra_reset" ]; then
-      extra_reset=$(date -d "$(date +%Y-%m-01) +1 month" +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    fi
-
-    extra_col="${white}extra${reset}   ${extra_bar} ${extra_pct_color}\$${extra_used}${dim}/${reset}${white}\$${extra_limit}${reset} ${dim}⟳${reset} ${white}${extra_reset}${reset}"
-    [ -n "$rate_lines" ] && rate_lines+="\n"
-    rate_lines+="${extra_col}"
-  fi
 fi
 
 # ── Output ──────────────────────────────────────────────
