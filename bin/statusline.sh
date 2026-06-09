@@ -347,7 +347,7 @@ get_oauth_token() {
 # ════════════════════════════════════════════════════════
 
 # ── Configurable paths / knobs (env-overridable for tuning) ──
-cache_dir="${STATUSLINE_CACHE_DIR:-/tmp/claude}"
+cache_dir="${STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline}"
 cache_file="${cache_dir}/statusline-usage-cache.json"
 lock_dir="${cache_dir}/statusline-refresh.lock"
 api_ttl="${STATUSLINE_API_TTL:-900}"        # 15 min — 5h/7d cache-fallback TTL
