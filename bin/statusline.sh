@@ -482,7 +482,7 @@ if [ -n "$five_pct" ]; then
   five_reset_fmt=$(format_reset_time "$five_reset" "time")
   five_bar=$(build_bar "$five_n" "$bar_width")
   five_color=$(color_for_pct "$five_n")
-  rate_lines+="${white}cur.${reset} ${five_bar} ${five_color}${five_n}%${reset} ${dim}⟳${reset} ${white}${five_reset_fmt}${reset}"
+  rate_lines+="${white}cur.${reset} ${five_bar} ${five_color}${five_n}%${reset} ${white}${five_reset_fmt}${reset}"
 fi
 
 if [ -n "$seven_pct" ]; then
@@ -491,7 +491,7 @@ if [ -n "$seven_pct" ]; then
   seven_bar=$(build_bar "$seven_n" "$bar_width")
   seven_color=$(color_for_pct "$seven_n")
   [ -n "$rate_lines" ] && rate_lines+="${sep}"
-  rate_lines+="${white}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${dim}⟳${reset} ${white}${seven_reset_fmt}${reset}"
+  rate_lines+="${white}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${white}${seven_reset_fmt}${reset}"
 fi
 
 # ── Output ──────────────────────────────────────────────
