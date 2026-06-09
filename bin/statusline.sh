@@ -57,6 +57,19 @@ color_for_pct() {
   fi
 }
 
+# Color the model segment by family, classified from the already-normalized
+# model_name (sourced live from Claude Code's own .model.display_name). Substring
+# match also covers legacy claude-3-* ids; the "Claude" default and any
+# non-Anthropic model fall through to white as an "unrecognized" signal.
+color_for_model() {
+  case "$1" in
+  *opus*) printf '%b' "$magenta" ;;
+  *sonnet*) printf '%b' "$blue" ;;
+  *haiku*) printf '%b' "$cyan" ;;
+  *) printf '%b' "$white" ;;
+  esac
+}
+
 build_bar() {
   local pct=$1
   local width=$2
@@ -249,7 +262,8 @@ if [ -n "$session_start" ] && [ "$session_start" != "null" ]; then
   fi
 fi
 
-line1="${blue}${model_name}${reset}"
+model_color=$(color_for_model "$model_name")
+line1="${model_color}${model_name}${reset}"
 line1+="${sep}"
 line1+="${pct_color}${pct_used}%${reset}"
 line1+="${sep}"
