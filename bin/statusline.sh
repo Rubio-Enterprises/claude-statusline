@@ -129,8 +129,8 @@ format_reset_time() {
     [ -z "$result" ] && result=$(date -d "@$epoch" +"%l:%M%P" 2>/dev/null | sed 's/^ //; s/\.//g')
     ;;
   datetime)
-    result=$(date -j -r "$epoch" +"%b %-d, %l:%M%p" 2>/dev/null | sed 's/  / /g; s/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
-    [ -z "$result" ] && result=$(date -d "@$epoch" +"%b %-d, %l:%M%P" 2>/dev/null | sed 's/  / /g; s/^ //; s/\.//g')
+    result=$(date -j -r "$epoch" +"%a %-m/%-d @ %l:%M%p" 2>/dev/null | sed 's/  / /g; s/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
+    [ -z "$result" ] && result=$(date -d "@$epoch" +"%a %-m/%-d @ %l:%M%P" 2>/dev/null | sed 's/  / /g; s/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
     ;;
   *)
     result=$(date -j -r "$epoch" +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
@@ -141,7 +141,18 @@ format_reset_time() {
 }
 
 # ── Extract JSON data ───────────────────────────────────
-model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"')
+# Shorten the display name to an id-like token: lowercase, split off a
+# "(… context)" suffix as "[…]" first (so dots inside the size survive, e.g.
+# 1.5M → [1.5m]), then hyphenate the spaces/dots in the remaining name.
+# "Opus 4.8 (1M context)" → "opus-4-8[1m]"; "Opus 4.8" → "opus-4-8".
+model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"' | tr '[:upper:]' '[:lower:]')
+model_ctx=""
+ctx_re='\(([^[:space:])]+)[[:space:]]context\)$'
+if [[ "$model_name" =~ $ctx_re ]]; then
+  model_ctx="[${BASH_REMATCH[1]}]"
+  model_name=${model_name%%(*}
+fi
+model_name="$(echo "$model_name" | sed -E 's/[[:space:]]+$//; s/[ .]/-/g')${model_ctx}"
 
 size=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
 [ "$size" -eq 0 ] 2>/dev/null && size=200000
@@ -178,11 +189,45 @@ cwd=$(echo "$input" | jq -r '.cwd // ""')
 dirname=$(basename "$cwd")
 
 git_branch=""
-git_dirty=""
+git_status_markers=""
 if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
-  if [ -n "$(git -C "$cwd" status --porcelain 2>/dev/null)" ]; then
-    git_dirty="*"
+  # Detached HEAD: symbolic-ref is empty, so fall back to the short SHA — this
+  # also un-gates the status markers below, which key off a non-empty branch.
+  [ -z "$git_branch" ] && git_branch=$(git -C "$cwd" rev-parse --short HEAD 2>/dev/null)
+
+  # Ahead/behind vs upstream (output: "<behind>\t<ahead>"); listed first so
+  # the cluster reads (branch ↑N ↓N +S ~M ?U !C). Empty when no upstream.
+  ab=$(git -C "$cwd" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)
+  if [ -n "$ab" ]; then
+    read -r behind ahead <<<"$ab"
+    [ "${ahead:-0}" -gt 0 ] && git_status_markers+=" ${green}↑${ahead}${reset}"
+    [ "${behind:-0}" -gt 0 ] && git_status_markers+=" ${red}↓${behind}${reset}"
+  fi
+
+  # Tally working-tree state from porcelain v1 ("XY path"). A file can be both
+  # staged (X) and modified (Y) — e.g. "MM" — so it counts in both columns.
+  porcelain=$(git -C "$cwd" status --porcelain 2>/dev/null)
+  if [ -n "$porcelain" ]; then
+    n_staged=0
+    n_modified=0
+    n_untracked=0
+    n_conflict=0
+    while IFS= read -r line; do
+      xy=${line:0:2}
+      case "$xy" in
+      "??") n_untracked=$((n_untracked + 1)) ;;
+      DD | AU | UD | UA | DU | AA | UU) n_conflict=$((n_conflict + 1)) ;;
+      *)
+        [ "${xy:0:1}" != " " ] && n_staged=$((n_staged + 1))
+        [ "${xy:1:1}" != " " ] && n_modified=$((n_modified + 1))
+        ;;
+      esac
+    done <<<"$porcelain"
+    [ "$n_staged" -gt 0 ] && git_status_markers+=" ${green}+${n_staged}${reset}"
+    [ "$n_modified" -gt 0 ] && git_status_markers+=" ${red}~${n_modified}${reset}"
+    [ "$n_untracked" -gt 0 ] && git_status_markers+=" ${dim}?${n_untracked}${reset}"
+    [ "$n_conflict" -gt 0 ] && git_status_markers+=" ${magenta}!${n_conflict}${reset}"
   fi
 fi
 
@@ -205,16 +250,7 @@ fi
 
 line1="${blue}${model_name}${reset}"
 line1+="${sep}"
-line1+="✍️ ${pct_color}${pct_used}%${reset}"
-line1+="${sep}"
-line1+="${cyan}${dirname}${reset}"
-if [ -n "$git_branch" ]; then
-  line1+=" ${green}(${git_branch}${red}${git_dirty}${green})${reset}"
-fi
-if [ -n "$session_duration" ]; then
-  line1+="${sep}"
-  line1+="${dim}⏱ ${reset}${white}${session_duration}${reset}"
-fi
+line1+="${pct_color}${pct_used}%${reset}"
 line1+="${sep}"
 case "$effort" in
 high) line1+="${magenta}● ${effort}${reset}" ;;
@@ -222,6 +258,15 @@ medium) line1+="${dim}◑ ${effort}${reset}" ;;
 low) line1+="${dim}◔ ${effort}${reset}" ;;
 *) line1+="${dim}◑ ${effort}${reset}" ;;
 esac
+line1+="${sep}"
+line1+="${cyan}${dirname}${reset}"
+if [ -n "$git_branch" ]; then
+  line1+=" ${green}(${git_branch}${reset}${git_status_markers}${green})${reset}"
+fi
+if [ -n "$session_duration" ]; then
+  line1+="${sep}"
+  line1+="${dim}⏱ ${reset}${white}${session_duration}${reset}"
+fi
 
 # ── OAuth token resolution ──────────────────────────────
 get_oauth_token() {
@@ -426,15 +471,14 @@ fi
 
 # ── Rate limit lines ────────────────────────────────────
 rate_lines=""
-bar_width=10
+bar_width=5
 
 if [ -n "$five_pct" ]; then
   five_n=$(echo "$five_pct" | awk '{printf "%.0f", $1}')
   five_reset_fmt=$(format_reset_time "$five_reset" "time")
   five_bar=$(build_bar "$five_n" "$bar_width")
   five_color=$(color_for_pct "$five_n")
-  five_fmt=$(printf "%3d" "$five_n")
-  rate_lines+="${white}current${reset} ${five_bar} ${five_color}${five_fmt}%${reset} ${dim}⟳${reset} ${white}${five_reset_fmt}${reset}"
+  rate_lines+="${white}cur.${reset} ${five_bar} ${five_color}${five_n}%${reset} ${dim}⟳${reset} ${white}${five_reset_fmt}${reset}"
 fi
 
 if [ -n "$seven_pct" ]; then
@@ -442,9 +486,8 @@ if [ -n "$seven_pct" ]; then
   seven_reset_fmt=$(format_reset_time "$seven_reset" "datetime")
   seven_bar=$(build_bar "$seven_n" "$bar_width")
   seven_color=$(color_for_pct "$seven_n")
-  seven_fmt=$(printf "%3d" "$seven_n")
-  [ -n "$rate_lines" ] && rate_lines+="\n"
-  rate_lines+="${white}weekly${reset}  ${seven_bar} ${seven_color}${seven_fmt}%${reset} ${dim}⟳${reset} ${white}${seven_reset_fmt}${reset}"
+  [ -n "$rate_lines" ] && rate_lines+="${sep}"
+  rate_lines+="${white}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${dim}⟳${reset} ${white}${seven_reset_fmt}${reset}"
 fi
 
 # ── extra_usage (API/cache only — not in stdin) ─────────
