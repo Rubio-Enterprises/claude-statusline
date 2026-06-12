@@ -35,7 +35,7 @@
 # yq — used by the `_tasks` merge-yamllint.sh hook to deep-merge consumer-side
 # .yamllint.local into the template-rendered .yamllint at copier render time.
 # Pinning universally so consumers can rely on it for their own scripts too.
-"aqua:mikefarah/yq"          = "4"
+"aqua:mikefarah/yq"          = "4.53.2"
 # Biome 2.x — TS archetypes (including ts-web-angular). The lefthook `biome`
 # command uses `npx biome` (consumer-owned devDep), but mise pinning here
 # documents the org-floor version + lands the binary on PATH for `mise exec`
