@@ -42,7 +42,7 @@ normalization, and runs an install/uninstall roundtrip against a throwaway
 
 ```bash
 bash .claude/skills/run-claude-statusline/driver.sh
-# → 11 passed, 0 failed   (exit 0)
+# → 12 passed, 0 failed   (exit 0)
 ```
 
 To see the **actual rendered line** for a payload (debugging a render change),
