@@ -83,24 +83,35 @@ for pair in "Fable 5:fable-5" "Sonnet 4.6:sonnet-4-6" "Haiku 4.5:haiku-4-5"; do
 done
 
 echo "[4] install.js — install + uninstall roundtrip (throwaway HOME)"
-H="$WORK/home"
-mkdir -p "$H"
-HOME="$H" node "$INSTALL" >/dev/null 2>&1
-if [ -f "$H/.claude/statusline.sh" ]; then
-  ok "install copied statusline.sh"
+# node is a hard dependency here (install.js is node); preflight it so a missing
+# interpreter reads as "node absent" rather than "install.js misbehaved".
+if ! command -v node >/dev/null 2>&1; then
+  no "node not found — cannot run installer roundtrip"
 else
-  no "install: statusline.sh missing"
-fi
-if grep -q '"statusLine"' "$H/.claude/settings.json" 2>/dev/null; then
-  ok "install wired settings.json"
-else
-  no "install: settings.json not wired"
-fi
-HOME="$H" node "$INSTALL" --uninstall >/dev/null 2>&1
-if [ ! -f "$H/.claude/statusline.sh" ]; then
-  ok "uninstall removed statusline.sh"
-else
-  no "uninstall: statusline.sh remains"
+  H="$WORK/home"
+  mkdir -p "$H"
+  HOME="$H" node "$INSTALL" >/dev/null 2>&1
+  if [ -f "$H/.claude/statusline.sh" ]; then
+    ok "install copied statusline.sh"
+  else
+    no "install: statusline.sh missing"
+  fi
+  if grep -q '"statusLine"' "$H/.claude/settings.json" 2>/dev/null; then
+    ok "install wired settings.json"
+  else
+    no "install: settings.json not wired"
+  fi
+  HOME="$H" node "$INSTALL" --uninstall >/dev/null 2>&1
+  if [ ! -f "$H/.claude/statusline.sh" ]; then
+    ok "uninstall removed statusline.sh"
+  else
+    no "uninstall: statusline.sh remains"
+  fi
+  if ! grep -q '"statusLine"' "$H/.claude/settings.json" 2>/dev/null; then
+    ok "uninstall unwired settings.json"
+  else
+    no "uninstall: statusLine hook still present in settings.json"
+  fi
 fi
 
 echo
