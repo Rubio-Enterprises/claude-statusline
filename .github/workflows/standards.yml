@@ -137,7 +137,7 @@ jobs:
         run: |
           if [ -f astro.config.mjs ] || [ -f astro.config.ts ]; then
             mise exec -- npx --no-install astro check
-          elif mise exec -- node -e "process.exit(require('./package.json').scripts?.typecheck ? 0 : 1)" 2>/dev/null; then
+          elif mise exec -- npm pkg get scripts.typecheck 2>/dev/null | grep -q '"'; then
             mise exec -- npm run typecheck
           else
             # ts-* archetype but no astro config AND no scripts.typecheck (e.g. a
