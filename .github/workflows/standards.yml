@@ -105,7 +105,18 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6
+      - name: Install uv (routes mise pipx installs through uvx)
+        # .mise.toml pins pipx-backed tools (copier, yamllint). Without uv on
+        # PATH, mise >= 2026.6.2's pipx backend falls back to pip's
+        # --uploaded-prior-to, which cold runners' bootstrap pip (< 26) rejects,
+        # so `mise install` hard-fails BEFORE tsc ever runs. The bootstrap that
+        # adds `pipx:copier` to a consumer's .mise.toml surfaced this. Mirrors
+        # copier-sync.yml / copier-check.yml / lint-hooks.yml.
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       - uses: jdx/mise-action@v4
+        with:
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: "2026.6.9"
       - name: Install JS deps
         # Type-checking needs node_modules (typescript, @types/*, astro). mise
         # installs the toolchain but not the workspace; mirror lint-hooks.yml's
