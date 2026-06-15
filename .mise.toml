@@ -7,8 +7,8 @@
 # package.json devDep, but Pattern E preserves the consumer's package.json
 # (`_skip_if_exists`), so the assumption broke. mise pinning is the consistent
 # audit-side contract — same as how gitleaks/conftest/check-jsonschema work.
-"npm:@commitlint/cli" = "20.5.3"
-"npm:@commitlint/config-conventional" = "20.5.3"
+"npm:@commitlint/cli" = "20"
+"npm:@commitlint/config-conventional" = "20"
 
 # Hook tools backing lefthook.yml. Universal across archetypes — every
 # archetype's lefthook runs markdownlint/yamllint/prettier and most run
@@ -16,26 +16,33 @@
 # resolve these binaries on a fresh CI runner (and via `mise exec --` locally
 # without polluting the developer's global tool surface).
 "aqua:koalaman/shellcheck" = "0.10"
-"aqua:mvdan/sh"            = "3.13.1"   # shfmt
+"aqua:mvdan/sh"            = "3.10"   # shfmt
 "npm:markdownlint-cli2"    = "0.22"
-"npm:prettier"             = "3.8.4"
-"pipx:yamllint"            = "1.38.0"
+"npm:prettier"             = "3.4"
+"pipx:yamllint"            = "1.37"
 # lefthook binary itself. The lint-hooks CI job runs `mise exec -- lefthook
 # run pre-commit --all-files`, which requires lefthook on PATH from mise (the
 # CI runner doesn't carry it natively). Locally developers usually have
 # lefthook via Homebrew; pinning here keeps CI and the developer-laptop
 # parity. The audit-side .standards/.mise.toml does NOT pin lefthook because
 # audit.yml doesn't invoke it — only consumer-side lint-hooks does.
-"aqua:evilmartians/lefthook" = "2.1.9"
+"aqua:evilmartians/lefthook" = "2"
 # gitleaks here mirrors the audit-side pin in .standards/.mise.toml. The
 # lefthook pre-commit gitleaks hook invokes a bare `gitleaks git --staged`,
 # which needs the binary on PATH — the consumer-side lint-hooks CI job
 # doesn't materialize .standards/ so cannot rely on that pin.
-"aqua:gitleaks/gitleaks"     = "8.30.1"
+"aqua:gitleaks/gitleaks"     = "8"
 # yq — used by the `_tasks` merge-yamllint.sh hook to deep-merge consumer-side
 # .yamllint.local into the template-rendered .yamllint at copier render time.
 # Pinning universally so consumers can rely on it for their own scripts too.
-"aqua:mikefarah/yq"          = "4.53.2"
+"aqua:mikefarah/yq"          = "4"
+# copier — the weekly copier-sync reusable workflow (.github/copier-sync.yml)
+# runs a bare `copier update`, bootstrapping tools via mise-action. The CI
+# runner image does not ship copier, so without this pin the sync job exits
+# 127 (command not found). Pinning here lands it on the mise PATH for both CI
+# and local `copier update` parity. The reusable workflow also installs copier
+# explicitly as belt-and-braces for consumers not yet re-rendered with this pin.
+"pipx:copier"                = "9"
 # Biome 2.x — TS archetypes (including ts-web-angular). The lefthook `biome`
 # command uses `npx biome` (consumer-owned devDep), but mise pinning here
 # documents the org-floor version + lands the binary on PATH for `mise exec`
@@ -52,7 +59,7 @@
 # want Biome alongside ESLint (e.g. super-productivity's `scripts.lint: "biome
 # check ."`). Consumers who don't want Biome can delete biome.json; `_skip_if_exists`
 # keeps it from coming back on `copier update`.
-"npm:@biomejs/biome"       = "2.4.16"
+"npm:@biomejs/biome"       = "2"
 # TS archetypes: tasks delegate to package.json scripts (the consumer owns
 # package.json per Pattern A/D / _skip_if_exists). The audit Layer B JSON
 # Schema enforces that lint, test, e2e exist in scripts; this contract makes
@@ -61,6 +68,19 @@
 [tasks.lint]
 description = "Delegates to scripts.lint in package.json"
 run = ["npm run lint"]
+
+[tasks.typecheck]
+# Strict TS type-check (§ type-checking floor). Delegates to scripts.typecheck
+# in package.json (`tsc --noEmit`, or `astro check` for astro repos) — added by
+# the ensure-pkg-typecheck-script.sh _tasks hook and required by
+# package-json.schema.json for ts-* archetypes. The rendered standards.yml
+# `typecheck` job invokes `astro check` directly when astro.config.* is present
+# and otherwise runs `npm run typecheck` (this task's delegate). [tasks.lint]
+# above only runs `npm run lint`, which historically did NOT run tsc — this is
+# the task that makes `mise run typecheck` a uniform local invocation matching
+# the CI gate.
+description = "Delegates to scripts.typecheck in package.json (tsc --noEmit; `astro check` for astro repos)"
+run = ["npm run typecheck"]
 
 [tasks.test]
 description = "Delegates to scripts.test in package.json"

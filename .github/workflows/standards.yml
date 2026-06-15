@@ -25,7 +25,7 @@ jobs:
     # the SHA when .github@v1 advances. Without it, the SHA pin is opaque to
     # Renovate and never gets updated.
     if: github.event_name != 'pull_request' || github.event.action != 'edited'
-    uses: Rubio-Enterprises/.github/.github/workflows/audit.yml@266c2d8aa76cf9572a0b501650925518e2bc66ba # v1
+    uses: Rubio-Enterprises/.github/.github/workflows/audit.yml@1e5c9489b1c9a9d9cf1d146b4566b37ee5c26a13 # v1
   commitlint-pr-title:
     # PR-title conventional-commit check. Uses the canonical
     # amannn/action-semantic-pull-request action: it bundles commitlint and
@@ -62,7 +62,7 @@ jobs:
           requireScope: false
   gitleaks:
     if: github.event_name == 'pull_request' && github.event.action != 'edited'
-    uses: Rubio-Enterprises/.github/.github/workflows/secret-scan.yml@266c2d8aa76cf9572a0b501650925518e2bc66ba # v1
+    uses: Rubio-Enterprises/.github/.github/workflows/secret-scan.yml@1e5c9489b1c9a9d9cf1d146b4566b37ee5c26a13 # v1
     with: { mode: gitleaks }
   trufflehog:
     # schedule = weekly automated; workflow_dispatch = manual re-trigger for
@@ -71,7 +71,7 @@ jobs:
     # Rubio-Enterprises/.github for the path-suppression flow that makes the
     # manual-trigger affordance load-bearing.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    uses: Rubio-Enterprises/.github/.github/workflows/secret-scan.yml@266c2d8aa76cf9572a0b501650925518e2bc66ba # v1
+    uses: Rubio-Enterprises/.github/.github/workflows/secret-scan.yml@1e5c9489b1c9a9d9cf1d146b4566b37ee5c26a13 # v1
     with: { mode: trufflehog }
 
   lint-hooks:
@@ -79,7 +79,77 @@ jobs:
     # diffs). Catches drift in hook-tool pins / PATH wiring that local commits
     # would otherwise hit first. PR-only; push/schedule paths skip.
     if: github.event_name == 'pull_request' && github.event.action != 'edited'
-    uses: Rubio-Enterprises/.github/.github/workflows/lint-hooks.yml@266c2d8aa76cf9572a0b501650925518e2bc66ba # v1
+    uses: Rubio-Enterprises/.github/.github/workflows/lint-hooks.yml@1e5c9489b1c9a9d9cf1d146b4566b37ee5c26a13 # v1
+
+  typecheck:
+    # Strict TypeScript type-check gate (§ type-checking — the TS/astro floor).
+    # The python floor rides the lint-hooks job via the pyright lefthook hook;
+    # tsc/astro-check are project-wide + slow (whole-program analysis, not a
+    # per-file staged subset) so they belong in a dedicated rendered job here
+    # rather than a pre-commit hook. This is an INLINE job (not a reusable
+    # workflow) so the python-floor change requires ZERO `.github` edits — only
+    # the TS half lands a new job, and it lives wholly in template-managed
+    # standards.yml so there's no reusable-workflow SHA bump to coordinate.
+    #
+    # Tool selection is CONFIG-PRESENCE-driven at runtime, not archetype-driven:
+    # `astro.config.mjs|ts` present → `astro check` (astro projects need the
+    # astro language server — bare tsc misses .astro components); otherwise
+    # `npm run typecheck` (scripts.typecheck := `tsc --noEmit`, ensured by the
+    # ensure-pkg-typecheck-script.sh _tasks hook + required by
+    # package-json.schema.json for ts-* archetypes). Detection is at CI time
+    # because copier.yml has no astro archetype — astro is only ever an
+    # astro.config.* present in a ts-web repo (see _skip_if_exists).
+    if: github.event_name == 'pull_request' && github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv (routes mise pipx installs through uvx)
+        # .mise.toml pins pipx-backed tools (copier, yamllint). Without uv on
+        # PATH, mise >= 2026.6.2's pipx backend falls back to pip's
+        # --uploaded-prior-to, which cold runners' bootstrap pip (< 26) rejects,
+        # so `mise install` hard-fails BEFORE tsc ever runs. The bootstrap that
+        # adds `pipx:copier` to a consumer's .mise.toml surfaced this. Mirrors
+        # copier-sync.yml / copier-check.yml / lint-hooks.yml.
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: jdx/mise-action@v4
+        with:
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: "2026.6.9"
+      - name: Install JS deps
+        # Type-checking needs node_modules (typescript, @types/*, astro). mise
+        # installs the toolchain but not the workspace; mirror lint-hooks.yml's
+        # install shape so pnpm/npm consumers both resolve.
+        env:
+          MISE_ENV: ci
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            mise exec -- corepack enable
+            mise exec -- pnpm install --frozen-lockfile
+          else
+            mise exec -- npm ci
+          fi
+        shell: bash
+      - name: Type-check (astro check / tsc --noEmit)
+        env:
+          MISE_ENV: ci
+        run: |
+          if [ -f astro.config.mjs ] || [ -f astro.config.ts ]; then
+            mise exec -- npx --no-install astro check
+          elif mise exec -- npm pkg get scripts.typecheck 2>/dev/null | grep -q '"'; then
+            mise exec -- npm run typecheck
+          else
+            # ts-* archetype but no astro config AND no scripts.typecheck (e.g. a
+            # JS-only react+vite app, or a bash CLI nominally typed ts-*). The
+            # ensure-pkg-typecheck-script.sh hook only adds the script when
+            # `typescript` is a (dev)dependency, so the job render condition
+            # (ts-* archetype) is broader than the script-ensure condition — the
+            # gate must tolerate the gap rather than fail on `npm run typecheck`
+            # (Missing script). Mirrors e2e.yml's graceful skip when no entry point.
+            echo "::notice::no astro config and no scripts.typecheck — nothing to type-check; skipping"
+          fi
+        shell: bash
   copier-sync:
     # Weekly + manual: detect drift between this repo's rendered template state
     # and the latest `template/v1` release, then open a PR with the rendered
@@ -90,7 +160,31 @@ jobs:
     if: >-
       github.event_name == 'schedule' && github.event.schedule == '0 8 * * 1'
       || github.event_name == 'workflow_dispatch'
-    uses: Rubio-Enterprises/.github/.github/workflows/copier-sync.yml@266c2d8aa76cf9572a0b501650925518e2bc66ba # v1
+    uses: Rubio-Enterprises/.github/.github/workflows/copier-sync.yml@1e5c9489b1c9a9d9cf1d146b4566b37ee5c26a13 # v1
     permissions:
       contents: write
       pull-requests: write
+    # Pass org secrets (COPIER_SYNC_APP_ID / _PRIVATE_KEY) to the reusable so it
+    # can mint a workflow-scoped App token — GITHUB_TOKEN cannot push changes to
+    # .github/workflows/standards.yml (no grantable `workflows` permission).
+    secrets: inherit
+  copier-check:
+    # Template-drift GATE (Layer 2). Detects REAL rendered drift from
+    # `template/v1` (a `git diff` after `copier update`, ignoring
+    # .copier-answers.yml — the same definition copier-sync uses to open a PR,
+    # so a red gate always means a sync PR can fix it).
+    #   • push to main → BLOCKING (fails the branch when drifted,
+    #     so main can't be green and releases can't ship while
+    #     behind the template). `[skip-drift-gate]` in the commit message bypasses
+    #     (emergency hotfix).
+    #   • pull_request → ADVISORY (annotates only, never fails) so in-flight
+    #     feature work isn't blocked by drift the contributor didn't introduce.
+    # Bootstrap repos (.github, .github-private, standards itself) don't render
+    # this template, so they never get the job.
+    if: >-
+      (github.event_name == 'push'
+        && !contains(github.event.head_commit.message, '[skip-drift-gate]'))
+      || (github.event_name == 'pull_request' && github.event.action != 'edited')
+    uses: Rubio-Enterprises/.github/.github/workflows/copier-check.yml@1e5c9489b1c9a9d9cf1d146b4566b37ee5c26a13 # v1
+    with:
+      mode: ${{ github.event_name == 'push' && 'blocking' || 'advisory' }}
