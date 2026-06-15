@@ -137,8 +137,17 @@ jobs:
         run: |
           if [ -f astro.config.mjs ] || [ -f astro.config.ts ]; then
             mise exec -- npx --no-install astro check
-          else
+          elif mise exec -- node -e "process.exit(require('./package.json').scripts?.typecheck ? 0 : 1)" 2>/dev/null; then
             mise exec -- npm run typecheck
+          else
+            # ts-* archetype but no astro config AND no scripts.typecheck (e.g. a
+            # JS-only react+vite app, or a bash CLI nominally typed ts-*). The
+            # ensure-pkg-typecheck-script.sh hook only adds the script when
+            # `typescript` is a (dev)dependency, so the job render condition
+            # (ts-* archetype) is broader than the script-ensure condition — the
+            # gate must tolerate the gap rather than fail on `npm run typecheck`
+            # (Missing script). Mirrors e2e.yml's graceful skip when no entry point.
+            echo "::notice::no astro config and no scripts.typecheck — nothing to type-check; skipping"
           fi
         shell: bash
   copier-sync:
