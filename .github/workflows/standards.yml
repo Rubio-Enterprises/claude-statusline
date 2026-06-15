@@ -117,23 +117,46 @@ jobs:
         with:
           # renovate: datasource=github-releases depName=jdx/mise
           version: "2026.6.9"
+      - name: Install pnpm (avoids corepack keyring drift)
+        # Stand up pnpm via the first-party `pnpm/action-setup` rather than
+        # `corepack enable && pnpm install`. Corepack <= 0.29 (bundled with Node
+        # 22.0-22.12, the line mise pins here) ships a stale pnpm signing-key
+        # trust store and crashes with `Cannot find matching keyid` fetching the
+        # `packageManager`-pinned pnpm. action-setup reads `packageManager` and
+        # installs exactly that version WITHOUT corepack. Mirrors e2e.yml /
+        # lint-hooks.yml; no-op when no pnpm-lock. Surfaced 2026-06-15 by the
+        # gmaps-sync bootstrap (fleet fan-out).
+        if: hashFiles('pnpm-lock.yaml') != ''
+        uses: pnpm/action-setup@v4
       - name: Install JS deps
         # Type-checking needs node_modules (typescript, @types/*, astro). mise
-        # installs the toolchain but not the workspace; mirror lint-hooks.yml's
-        # install shape so pnpm/npm consumers both resolve.
+        # installs the toolchain but not the workspace. Lockfile-aware, mirroring
+        # e2e.yml: a committed lockfile is REQUIRED (reproducible installs) — a
+        # package.json without one is a hard error, not a lenient `npm install`.
         env:
           MISE_ENV: ci
         run: |
-          if [ -f pnpm-lock.yaml ]; then
-            mise exec -- corepack enable
-            mise exec -- pnpm install --frozen-lockfile
-          else
-            mise exec -- npm ci
+          set -euo pipefail
+          if [ -f package.json ]; then
+            if   [ -f pnpm-lock.yaml ];               then pnpm install --frozen-lockfile
+            elif [ -f yarn.lock ];                    then corepack yarn install --frozen-lockfile
+            elif [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile
+            elif [ -f package-lock.json ];            then npm ci
+            else echo "::error::package.json without a lockfile — commit one"; exit 1
+            fi
           fi
         shell: bash
       - name: Type-check (astro check / tsc --noEmit)
         env:
           MISE_ENV: ci
+          # Conservative CI concurrency floor for monorepo build tools. A turbo
+          # repo's `typecheck` script spawns one tsc per package; at turbo's
+          # default (~all cores) a large workspace OOM-kills the 16 GB runner
+          # (e.g. karakeep's 23-package monorepo). tsc/astro ignore this env;
+          # turbo honors it; a repo's explicit `--concurrency` flag overrides it.
+          # Authoritative per-repo tuning belongs in the consumer-owned
+          # package.json `typecheck` script — this is only a fleet-wide floor.
+          TURBO_CONCURRENCY: "2"
         run: |
           if [ -f astro.config.mjs ] || [ -f astro.config.ts ]; then
             mise exec -- npx --no-install astro check
