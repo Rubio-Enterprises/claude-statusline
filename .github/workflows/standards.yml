@@ -116,7 +116,7 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           # renovate: datasource=github-releases depName=jdx/mise
-          version: "2026.6.9"
+          version: "2026.6.11"
       - name: Install pnpm (avoids corepack keyring drift)
         # Stand up pnpm via the first-party `pnpm/action-setup` rather than
         # `corepack enable && pnpm install`. Corepack <= 0.29 (bundled with Node
