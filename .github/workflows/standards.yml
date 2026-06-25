@@ -121,7 +121,35 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Detect TypeScript-relevant changes
+        id: ts_changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+
+          run_typecheck=false
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            case "$path" in
+              .copier-answers.yml|AGENTS.md|CLAUDE.md|README.md|CHANGELOG.md|RELEASES.md|LICENSE|LICENSE.*|LICENSE_*|docs/*|*.md)
+                ;;
+              *)
+                run_typecheck=true
+                echo "::notice::TypeScript typecheck will run; relevant change: $path"
+                break
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" HEAD)
+
+          echo "run=$run_typecheck" >> "$GITHUB_OUTPUT"
+          if [ "$run_typecheck" != true ]; then
+            echo "::notice::No TypeScript-relevant changes; skipping typecheck"
+          fi
+        shell: bash
       - name: Install uv (routes mise pipx installs through uvx)
+        if: steps.ts_changes.outputs.run == 'true'
         # .mise.toml pins pipx-backed tools (copier, yamllint). Without uv on
         # PATH, mise >= 2026.6.2's pipx backend falls back to pip's
         # --uploaded-prior-to, which cold runners' bootstrap pip (< 26) rejects,
@@ -130,10 +158,12 @@ jobs:
         # copier-sync.yml / copier-check.yml / lint-hooks.yml.
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4
+        if: steps.ts_changes.outputs.run == 'true'
         with:
           # renovate: datasource=github-releases depName=jdx/mise
           version: "2026.6.9"
       - name: Install pnpm (avoids corepack keyring drift)
+        if: steps.ts_changes.outputs.run == 'true' && hashFiles('pnpm-lock.yaml') != ''
         # Stand up pnpm via the first-party `pnpm/action-setup` rather than
         # `corepack enable && pnpm install`. Corepack <= 0.29 (bundled with Node
         # 22.0-22.12, the line mise pins here) ships a stale pnpm signing-key
@@ -142,9 +172,9 @@ jobs:
         # installs exactly that version WITHOUT corepack. Mirrors e2e.yml /
         # lint-hooks.yml; no-op when no pnpm-lock. Surfaced 2026-06-15 by the
         # gmaps-sync bootstrap (fleet fan-out).
-        if: hashFiles('pnpm-lock.yaml') != ''
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
       - name: Install JS deps
+        if: steps.ts_changes.outputs.run == 'true'
         # Type-checking needs node_modules (typescript, @types/*, astro). mise
         # installs the toolchain but not the workspace. Lockfile-aware, mirroring
         # e2e.yml: a committed lockfile is REQUIRED (reproducible installs) — a
@@ -163,6 +193,7 @@ jobs:
           fi
         shell: bash
       - name: Type-check (astro check / tsc --noEmit)
+        if: steps.ts_changes.outputs.run == 'true'
         env:
           MISE_ENV: ci
           # Conservative CI concurrency floor for monorepo build tools. A turbo
