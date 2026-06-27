@@ -42,12 +42,6 @@
         "repo": "Rubio-Enterprises/standards"
       }
     },
-    "superpowers-dev": {
-      "source": {
-        "source": "github",
-        "repo": "Rubio-Enterprises/superpowers"
-      }
-    },
     "tools-skills": {
       "source": {
         "source": "github",
@@ -77,7 +71,6 @@
     "regal-lsp@claude-lsps": true,
     "rubio-standards@rubio": true,
     "security-guidance@claude-plugins-official": true,
-    "superpowers@superpowers-dev": true,
     "swift-lsp@claude-plugins-official": true,
     "tools-skills@tools-skills": true,
     "vibe-kanban-skills@vibe-kanban-skills": true,
