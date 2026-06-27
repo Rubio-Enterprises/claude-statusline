@@ -161,7 +161,7 @@ jobs:
         if: steps.ts_changes.outputs.run == 'true'
         with:
           # renovate: datasource=github-releases depName=jdx/mise
-          version: "2026.6.9"
+          version: "2026.6.11"
       - name: Install pnpm (avoids corepack keyring drift)
         if: steps.ts_changes.outputs.run == 'true' && hashFiles('pnpm-lock.yaml') != ''
         # Stand up pnpm via the first-party `pnpm/action-setup` rather than
