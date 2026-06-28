@@ -53,6 +53,12 @@
         "source": "github",
         "repo": "Rubio-Enterprises/vibe-kanban-skills"
       }
+    },
+    "mattpocock-skills": {
+      "source": {
+        "source": "github",
+        "repo": "Rubio-Enterprises/mattpocock-skills"
+      }
     }
   },
   "enabledPlugins": {
@@ -74,7 +80,16 @@
     "swift-lsp@claude-plugins-official": true,
     "tools-skills@tools-skills": true,
     "vibe-kanban-skills@vibe-kanban-skills": true,
-    "vtsls@claude-lsps": true
+    "vtsls@claude-lsps": true,
+    "claude-code-setup@claude-plugins-official": true,
+    "code-modernization@claude-plugins-official": true,
+    "hookify@claude-plugins-official": true,
+    "mattpocock-skills@mattpocock-skills": true,
+    "playground@claude-plugins-official": true,
+    "plugin-dev@claude-plugins-official": true,
+    "pr-review-toolkit@claude-plugins-official": true,
+    "session-report@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": true
   },
   "hooks": {
     "SessionStart": [
