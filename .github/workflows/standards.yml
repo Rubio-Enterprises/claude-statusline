@@ -139,7 +139,7 @@ jobs:
           while IFS= read -r path; do
             [ -n "$path" ] || continue
             case "$path" in
-              .copier-answers.yml|AGENTS.md|CLAUDE.md|README.md|CHANGELOG.md|RELEASES.md|LICENSE|LICENSE.*|LICENSE_*|docs/*|*.md)
+              .copier-answers.yml|AGENTS.md|CLAUDE.md|README.md|CHANGELOG.md|RELEASES.md|LICENSE*|docs/*|*.md)
                 ;;
               *)
                 run_typecheck=true
