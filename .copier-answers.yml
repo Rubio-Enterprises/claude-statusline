@@ -1,10 +1,11 @@
 # Changes here will be overwritten by Copier; NEVER edit this file manually.
-_commit: template/v1.46.0
-_rubio_template_version: template/v1.46.0
+_commit: template/v1.48.1
+_rubio_template_version: template/v1.48.1
 _src_path: gh:Rubio-Enterprises/standards
 archetype: ts-cli
 default_branch: main
 has_e2e: false
+has_lint_hooks: true
 is_fork: true
 is_mcp_server: false
 is_monorepo: false
