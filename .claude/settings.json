@@ -30,12 +30,6 @@
         "repo": "Rubio-Enterprises/playwright-skills"
       }
     },
-    "prd-skills": {
-      "source": {
-        "source": "github",
-        "repo": "Rubio-Enterprises/prd-skills"
-      }
-    },
     "rubio": {
       "source": {
         "source": "github",
@@ -46,12 +40,6 @@
       "source": {
         "source": "github",
         "repo": "Rubio-Enterprises/tools-skills"
-      }
-    },
-    "vibe-kanban-skills": {
-      "source": {
-        "source": "github",
-        "repo": "Rubio-Enterprises/vibe-kanban-skills"
       }
     },
     "mattpocock-skills": {
@@ -72,14 +60,12 @@
     "frontend-design@claude-plugins-official": true,
     "infra-skills@infra-skills": true,
     "playwright-skills@playwright-skills": true,
-    "prd-skills@prd-skills": true,
     "pyright@claude-lsps": true,
     "regal-lsp@claude-lsps": true,
     "rubio-standards@rubio": true,
     "security-guidance@claude-plugins-official": true,
     "swift-lsp@claude-plugins-official": true,
     "tools-skills@tools-skills": true,
-    "vibe-kanban-skills@vibe-kanban-skills": true,
     "vtsls@claude-lsps": true,
     "claude-code-setup@claude-plugins-official": true,
     "code-modernization@claude-plugins-official": true,
