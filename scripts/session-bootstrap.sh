@@ -34,11 +34,15 @@ command -v jq >/dev/null 2>&1 || exit 0
 [ -f "$carrier" ] || exit 0
 
 # A marketplace is healthy only if BOTH halves of its pre-seed exist: the
-# clone on disk and its entry in the registry Claude Code reads at startup.
+# on-disk copy and its entry in the registry Claude Code reads at startup.
+# Health is tested via the .claude-plugin/marketplace.json manifest that
+# resolution actually reads, NOT via .git: Claude Code's native handling of
+# claude-plugins-official replaces the pre-seeded git clone with a GITLESS
+# directory at session start, which is perfectly healthy (observed live).
 missing=""
 while IFS= read -r name; do
   [ -n "$name" ] || continue
-  if [ ! -d "$clones/$name/.git" ] ||
+  if [ ! -f "$clones/$name/.claude-plugin/marketplace.json" ] ||
     ! jq -e --arg n "$name" 'has($n)' "$registry" >/dev/null 2>&1; then
     missing="$missing $name"
   fi
@@ -61,7 +65,7 @@ while IFS= read -r entry; do
   [ -n "$entry" ] || continue
   mkt="${entry##*@}"
   case " $missing " in *" $mkt "*) continue ;; esac
-  [ -d "$clones/$mkt/.git" ] || continue
+  [ -f "$clones/$mkt/.claude-plugin/marketplace.json" ] || continue
   [ -d "$HOME/.claude/plugins/cache/$mkt/${entry%@*}" ] || uncached="$uncached $entry"
 done <<EOF
 $(jq -r '(.enabledPlugins // {}) | to_entries[] | select(.value == true) | .key' "$carrier" 2>/dev/null)
