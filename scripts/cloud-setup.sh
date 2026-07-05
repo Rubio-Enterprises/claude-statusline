@@ -20,6 +20,15 @@
 # Bump CACHE_EPOCH (e.g. 1 -> 2) and re-save this field to force an env-cache rebuild.
 CACHE_EPOCH=1
 export CACHE_EPOCH
+# PRIVATE marketplaces: export the org's shared read-only fine-grained PAT
+# here (one org-wide token — the block stays fleet-uniform). The
+# "Environment variables" field reaches SESSIONS only, never this setup run
+# (proven: the build log printed "auth tokens present at build: NONE" with
+# GH_PAT set in that field), so this line is the only way the snapshot build
+# can clone private marketplace repos. Per the docs this field has the SAME
+# visibility as the env-vars field, so this is not a security downgrade.
+# Re-saving after editing this field rebuilds the cache automatically.
+export GH_PAT='github_pat_REPLACE_ME'
 for d in "${CLAUDE_PROJECT_DIR:-}" "$PWD"; do
   for sub in scripts Scripts; do
     [ -n "$d" ] && [ -f "$d/$sub/cloud-setup.sh" ] &&
@@ -60,21 +69,25 @@ CLOUD_SETUP_WEB_WRAPPER
 #     snapshot; the per-session SessionStart hook then fast-paths to a no-op.
 #
 # PRIVATE marketplace auth (REQUIRED only for PRIVATE org plugin bundles):
-#   Public org marketplaces (rubio-standards@rubio, claude-lsps) install in
-#   cloud with NO token. PRIVATE in-org bundle marketplaces declared in
-#   .claude/settings.json need a GH_PAT — a fine-grained PAT (Rubio-Enterprises,
-#   Contents:Read on the private marketplace repos) set in each environment's
-#   "Environment variables" UI field. ONE shared, narrowly-scoped, read-only
-#   token reused across ALL cloud environments is sufficient: "per environment"
-#   means the GH_PAT var must be PRESENT in each environment's settings, NOT that
-#   each environment needs a DISTINCT token. The per-marketplace-repo credential
-#   helper registered below (after the apt step, once jq is available) reads it
-#   at CLONE time and is scoped so the read-only token only ever authenticates
-#   the marketplace clones, never the working repo. The cloud GitHub token is
-#   injected at SESSION start, NOT at setup time, so the helper must be a RUNTIME
-#   helper (it cannot embed a token that is not present yet). GH_PAT is a
-#   distinct name so it takes precedence over the auto-injected,
-#   working-repo-scoped GH_TOKEN for those marketplace repos.
+#   Public org marketplaces install in cloud with NO token. PRIVATE in-org
+#   bundle marketplaces declared in .claude/settings.json need GH_PAT — a
+#   fine-grained PAT (Rubio-Enterprises, Contents:Read on the private
+#   marketplace repos) EXPORTED IN THE "Setup script" WRAPPER above, NOT in
+#   the "Environment variables" field: env vars are injected into SESSIONS
+#   only, never into setup/snapshot builds — proven 2026-07 when the build
+#   diagnostic printed "auth tokens present at build: NONE" with GH_PAT set
+#   in that field — and the pre-seed clones run at BUILD time. Per the docs
+#   both fields share the same visibility ("Both environment variables and
+#   setup scripts are stored in the environment configuration, visible to
+#   anyone who can edit that environment"), so the wrapper placement is not
+#   a security downgrade. ONE shared, narrowly-scoped, read-only token
+#   reused across ALL cloud environments is sufficient. The
+#   per-marketplace-repo credential helper registered below reads it at
+#   CLONE time and is scoped so the read-only token only ever authenticates
+#   the marketplace clones, never the working repo. Do NOT put GH_PAT or
+#   GH_TOKEN in the env-vars field: GH_PAT there never reaches builds, and a
+#   user-set GH_TOKEN CLOBBERS the platform's session-injected
+#   working-repo-scoped token (observed live).
 set -uo pipefail
 
 # Operate from the repo root regardless of the caller's cwd (the UI Setup script
@@ -96,32 +109,54 @@ echo "cloud-setup: building claude-statusline environment cache (epoch ${CACHE_E
 # Idempotent; non-fatal.
 git config --global url."https://github.com/".insteadOf "git@github.com:" || true
 
-# apt (root-only — cannot live in the portable hook) runs in parallel with the
-# toolchain bootstrap to stay within the cache-build time budget.
-#   gh — not pre-installed in the cloud image; some workflows need the CLI
-#        beyond the built-in GitHub tools.
-#   jq — parse the committed .claude/settings.json so the marketplace credential
-#        helper can be scoped per-repo (registered after this install finishes).
-# Non-fatal: a Setup script that exits non-zero blocks the session from
-# starting, so a transient apt blip must not abort the whole cache build.
-(
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update && apt-get install -y --no-install-recommends gh jq
-) &
-apt_pid=$!
+# apt (root-only — cannot live in the portable hook), GUARDED: jq is the only
+# apt dependency — it parses the committed .claude/settings.json so the
+# credential helper and the marketplace pre-seed can be scoped per-repo — and
+# the cloud base image has shipped it for a while now (snapshot logs showed
+# the old "gh/jq install failed" line followed by a successfully SCOPED
+# helper, which requires jq). So apt here is a fallback for a base-image
+# regression, not a routine step: most rebuilds skip the slowest, flakiest
+# network dependency entirely. gh is dropped — it never installed
+# successfully in this environment, nothing in this setup uses it, and cloud
+# sessions use the built-in GitHub tools. When the install does run it is
+# parallel with the toolchain bootstrap and non-fatal (a Setup script that
+# exits non-zero blocks the session from starting): on failure the credential
+# helper degrades to its global fallback and the pre-seed no-ops.
+apt_pid=""
+if ! command -v jq >/dev/null 2>&1; then
+  (
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends jq
+  ) &
+  apt_pid=$!
+fi
 
 # Same bootstrap the SessionStart hook runs. Installing it here bakes the pinned
 # mise toolchain into the snapshot. CLAUDE_CODE_REMOTE=true forces the hook's
 # cloud branch (the var isn't reliably exported this early). GH_TOKEN ->
 # GITHUB_TOKEN lets mise's aqua/github backends fetch release metadata without
 # the unauthenticated GitHub rate limit (the hook also bridges this internally;
-# belt-and-suspenders). Guarded so a greenfield render with no hook yet no-ops.
+# belt-and-suspenders). GH_PAT is the LAST fallback so environments only ever
+# need to provide GH_PAT (exported in the Setup-script wrapper — see the
+# header notes): at snapshot time neither the session-injected GH_TOKEN nor
+# the env-vars field exists, and any valid token — the read-only marketplace
+# PAT included — lifts the anonymous api.github.com rate limit. (Do NOT set
+# GH_TOKEN in the env-vars field: the platform injects its own
+# working-repo-scoped GH_TOKEN at session start, and a user-set value
+# clobbers it — observed live.)
+# Guarded so a greenfield render with no hook yet no-ops.
+# CLOUD_SETUP_BUILD=1 tells the repo-owned scripts/session-bootstrap.sh (run
+# by the hook) that this is the snapshot build, not a live session: its
+# marketplace-health check must skip here because the pre-seed section below
+# has not run yet at this point in the build.
 if [ -f scripts/claude-session-start.sh ]; then
-  CLAUDE_CODE_REMOTE=true GITHUB_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}" \
+  CLAUDE_CODE_REMOTE=true CLOUD_SETUP_BUILD=1 GITHUB_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-${GH_PAT:-}}}" \
     bash scripts/claude-session-start.sh || true
 fi
 
-wait "$apt_pid" || echo "cloud-setup: gh/jq install failed (non-fatal; built-in GitHub tools still work; credential helper falls back to global)" >&2
+if [ -n "$apt_pid" ]; then
+  wait "$apt_pid" || echo "cloud-setup: jq install failed (non-fatal; credential helper falls back to global; marketplace pre-seed skipped)" >&2
+fi
 
 # --- Private-marketplace git credential helper (RUNTIME, repo-scoped) --------
 # Register a runtime credential helper for the PRIVATE in-org marketplace repos
@@ -142,15 +177,21 @@ wait "$apt_pid" || echo "cloud-setup: gh/jq install failed (non-fatal; built-in 
 # Idempotent (git config --global overwrites); non-fatal.
 # shellcheck disable=SC2016  # ${GH_PAT:-...} must stay literal and expand at clone time, not now
 __mkt_helper='!f(){ echo username=x-access-token; echo "password=${GH_PAT:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"; };f'
+# ONE parse of the carrier feeds BOTH the credential-helper scoping here and
+# the marketplace pre-seed section below: "<name>\t<owner/repo>" per github
+# marketplace. (The pre-seed needs the marketplace NAME — it is the on-disk
+# clone dir and the registry key — not just the repo, so extract pairs first,
+# then derive the unique repo list for the helper loop.)
+__mkt_pairs=""
 __mkt_repos=""
 if command -v jq >/dev/null 2>&1 && [ -f .claude/settings.json ]; then
-  __mkt_repos="$(jq -r '
+  __mkt_pairs="$(jq -r '
     (.extraKnownMarketplaces // {})
     | to_entries[]
-    | .value.source
-    | select(type == "object" and .source == "github" and (.repo | type == "string"))
-    | .repo
-  ' .claude/settings.json 2>/dev/null | sort -u)"
+    | select(.value.source | type == "object" and .source == "github" and (.repo | type == "string"))
+    | "\(.key)\t\(.value.source.repo)"
+  ' .claude/settings.json 2>/dev/null)"
+  __mkt_repos="$(printf '%s\n' "$__mkt_pairs" | cut -f2 | sort -u)"
 fi
 if [ -n "$__mkt_repos" ]; then
   printf '%s\n' "$__mkt_repos" | while IFS= read -r __repo; do
@@ -168,19 +209,139 @@ else
   echo "cloud-setup: global marketplace credential helper (jq/carrier unavailable; unscoped fallback)" >&2
 fi
 
+# --- Marketplace pre-seed (WORKAROUND: cloud skips native marketplace sync) --
+# Claude Code on the web now launches sessions with SKIP_PLUGIN_MARKETPLACE=true
+# in the platform startup context (observed 2026-07 in /tmp/env-manager.log
+# "startup_context_env_var_keys"). With that flag set, Claude Code never syncs
+# the carrier's extraKnownMarketplaces, so at startup EVERY enabledPlugins
+# entry is dropped as "orphaned ... marketplace not registered" and no org
+# plugin loads. Setting SKIP_PLUGIN_MARKETPLACE=false in the environment's
+# env-vars field does NOT win over the startup context. Workaround: materialize
+# at SNAPSHOT time exactly the on-disk state the native sync would have
+# produced — one clone per marketplace, its registry entry, AND an installed
+# cache copy of every enabled plugin (all three layers are required) — so
+# startup plugin resolution finds everything already in place.
+#   * Mirrors Claude Code's ~/.claude/plugins layout as of 2026-07
+#     (known_marketplaces.json entry = {source, installLocation, lastUpdated});
+#     an internals change can break it. REMOVE once a fresh cloud session loads
+#     plugins with no pre-seed (or SKIP_PLUGIN_MARKETPLACE is gone/false).
+#   * Clones run with GIT_CONFIG_GLOBAL=/dev/null plus the SAME inline runtime
+#     helper as above: that makes them independent of global insteadOf
+#     rewrites (the in-session git proxy rewrites github.com URLs; snapshot
+#     builds differ), and since git only invokes the helper on a 401, public
+#     marketplaces still clone tokenless while private ones use GH_PAT —
+#     which reaches this build ONLY via the Setup-script wrapper export (see
+#     the header notes: the env-vars field is sessions-only).
+#   * Freshness: clones refresh only when this snapshot rebuilds (CACHE_EPOCH
+#     bump or ~7-day expiry). Marketplace staleness is bounded by that; bump
+#     the epoch to pick up new plugin versions early.
+#   * Non-fatal per marketplace; failures are named with their stage so the
+#     operator can tell a missing GH_PAT from a network-policy block.
+if [ -n "$__mkt_pairs" ]; then
+  __mkt_root="$HOME/.claude/plugins/marketplaces"
+  __mkt_reg="$HOME/.claude/plugins/known_marketplaces.json"
+  __mkt_now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  __mkt_ok=""
+  __mkt_bad=""
+  mkdir -p "$__mkt_root" 2>/dev/null || true
+  # Which token vars actually reach the BUILD environment (names only, never
+  # values). A snapshot rebuild showed private marketplace clones failing
+  # while public ones succeeded — this line settles whether GH_PAT is
+  # injected into setup runs at all, or the token itself is being rejected.
+  __mkt_tok=""
+  [ -n "${GH_PAT:-}" ] && __mkt_tok="$__mkt_tok GH_PAT"
+  [ -n "${GH_TOKEN:-}" ] && __mkt_tok="$__mkt_tok GH_TOKEN"
+  [ -n "${GITHUB_TOKEN:-}" ] && __mkt_tok="$__mkt_tok GITHUB_TOKEN"
+  echo "cloud-setup: auth tokens present at build:${__mkt_tok:- NONE}" >&2
+  # The registry must be valid JSON before jq can merge into it (merging, not
+  # clobbering, preserves entries Claude Code wrote natively, e.g. the default
+  # claude-plugins-official registration).
+  jq -e . "$__mkt_reg" >/dev/null 2>&1 || printf '{}\n' >"$__mkt_reg" || true
+  while IFS=$'\t' read -r __mkt_name __mkt_repo; do
+    { [ -n "$__mkt_name" ] && [ -n "$__mkt_repo" ]; } || continue
+    __mkt_dst="$__mkt_root/$__mkt_name"
+    if [ -d "$__mkt_dst/.git" ]; then
+      GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null \
+        git -C "$__mkt_dst" -c "credential.helper=$__mkt_helper" \
+        pull --ff-only --quiet >/dev/null 2>&1 || true
+    else
+      rm -rf "$__mkt_dst"
+      GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null \
+        git -c "credential.helper=$__mkt_helper" \
+        clone --quiet --depth 1 "https://github.com/${__mkt_repo}.git" "$__mkt_dst" \
+        >/dev/null 2>&1 || true
+    fi
+    if [ -d "$__mkt_dst/.git" ]; then
+      __mkt_tmp="$(mktemp)"
+      if jq --arg name "$__mkt_name" --arg repo "$__mkt_repo" \
+        --arg loc "$__mkt_dst" --arg ts "$__mkt_now" \
+        '. + {($name): {source: {source: "github", repo: $repo}, installLocation: $loc, lastUpdated: $ts}}' \
+        "$__mkt_reg" >"$__mkt_tmp" 2>/dev/null; then
+        mv "$__mkt_tmp" "$__mkt_reg" || true
+        __mkt_ok="$__mkt_ok $__mkt_name"
+      else
+        rm -f "$__mkt_tmp"
+        __mkt_bad="$__mkt_bad $__mkt_name(register)"
+      fi
+    else
+      __mkt_bad="$__mkt_bad $__mkt_name(clone)"
+    fi
+  done <<EOF
+$__mkt_pairs
+EOF
+  # Cache materialization: registration + clone alone is NOT enough — each
+  # enabled plugin must ALSO be installed into
+  # ~/.claude/plugins/cache/<marketplace>/<plugin> or startup resolution drops
+  # it with "plugin-cache-miss ... run /plugin to refresh" (verified against
+  # the bundled CLI: with only the registry pre-seeded, sessions logged
+  # "Found 0 plugins"; after installs, "Found 19 plugins"). Use the CLI's own
+  # installer so the manifest and cache match whatever the running Claude
+  # Code version expects instead of mimicking its on-disk format. Idempotent
+  # ("already installed" no-ops); per-plugin non-fatal with a 60s cap; only
+  # plugins whose marketplace seeded OK are attempted — the rest are already
+  # reported by the marketplace summary below.
+  if command -v claude >/dev/null 2>&1; then
+    while IFS= read -r __mkt_plugin; do
+      [ -n "$__mkt_plugin" ] || continue
+      case " $__mkt_ok " in
+      *" ${__mkt_plugin##*@} "*) ;;
+      *) continue ;;
+      esac
+      timeout 60 claude plugin install "$__mkt_plugin" --scope project </dev/null >/dev/null 2>&1 ||
+        __mkt_bad="$__mkt_bad $__mkt_plugin(install)"
+    done <<EOF
+$(jq -r '(.enabledPlugins // {}) | to_entries[] | select(.value == true) | .key' .claude/settings.json 2>/dev/null)
+EOF
+    # A project-scope install rewrites the carrier cosmetically (key
+    # reordering); the enable entries already exist in it, so restore the
+    # committed bytes to keep the snapshot's working tree clean.
+    git checkout -- .claude/settings.json 2>/dev/null || true
+  else
+    echo "cloud-setup: claude CLI not on PATH at build time; plugin caches not materialized (plugins will not load)" >&2
+  fi
+  [ -n "$__mkt_ok" ] && echo "cloud-setup: pre-seeded plugin marketplaces:$__mkt_ok" >&2
+  [ -n "$__mkt_bad" ] && echo "cloud-setup: marketplace pre-seed FAILED for:$__mkt_bad (private repos need GH_PAT exported in the Setup-script wrapper — the env-vars field does NOT reach snapshot builds; check network policy)" >&2
+fi
+
 # --- Cache warming (caching-only; safe to delete) ---------------------------
 # Only the setup script's filesystem output is snapshotted — a session's own
 # build/test never enters the cache — so warm the archetype's dependency and
 # build caches here. All steps are non-fatal: a hiccup must not block the cache
 # build (the SessionStart hook / test runner installs on demand if anything
 # ends up missing).
-# Node/TS: warm node_modules so it lands in the
-# snapshot. Prefer the frozen-lockfile install; fall back to a plain install if
-# the lockfile is absent on this branch.
-if command -v pnpm >/dev/null 2>&1; then
+# Node/TS: warm node_modules so it lands in the snapshot. Key the package
+# manager off the COMMITTED lockfile, never PATH order: this repo is npm
+# (package-lock.json committed — see CLAUDE.md), and an unconditional
+# pnpm-first preference minted a stray pnpm-lock.yaml into the snapshot,
+# tripping the stop hook's untracked-files check in every session. Prefer the
+# frozen-lockfile install; fall back to a plain install when no lockfile is
+# committed on this branch.
+if [ -f package-lock.json ] && command -v npm >/dev/null 2>&1; then
+  (npm ci || npm install) >/dev/null 2>&1 || echo "cloud-setup: npm install failed (non-fatal)" >&2
+elif [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then
   (pnpm install --frozen-lockfile || pnpm install) >/dev/null 2>&1 || echo "cloud-setup: pnpm install failed (non-fatal)" >&2
 elif command -v npm >/dev/null 2>&1; then
-  (npm ci || npm install) >/dev/null 2>&1 || echo "cloud-setup: npm install failed (non-fatal)" >&2
+  npm install >/dev/null 2>&1 || echo "cloud-setup: npm install failed (non-fatal)" >&2
 fi
 
 # --- Drift fingerprint for the SessionStart hook ----------------------------
