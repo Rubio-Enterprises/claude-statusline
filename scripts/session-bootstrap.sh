@@ -71,7 +71,7 @@ issues=""
 [ -n "$missing" ] && issues="missing marketplaces:$missing"
 [ -n "$uncached" ] && issues="${issues:+$issues; }uncached plugins:$uncached"
 if [ -n "$issues" ]; then
-  printf 'NOTE: cloud plugin pre-seed incomplete — %s. The affected plugins/skills will not load. Check GH_PAT in the environment settings, then bump CACHE_EPOCH in the Setup-script wrapper and re-save to rebuild (see scripts/cloud-setup.sh).\n' "$issues"
+  printf 'NOTE: cloud plugin pre-seed incomplete — %s. The affected plugins/skills will not load. Ensure GH_PAT is exported in the Setup-script WRAPPER (the env-vars field does not reach snapshot builds), then re-save the wrapper to rebuild (see scripts/cloud-setup.sh).\n' "$issues"
 fi
 
 exit 0

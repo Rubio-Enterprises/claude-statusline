@@ -20,6 +20,15 @@
 # Bump CACHE_EPOCH (e.g. 1 -> 2) and re-save this field to force an env-cache rebuild.
 CACHE_EPOCH=1
 export CACHE_EPOCH
+# PRIVATE marketplaces: export the org's shared read-only fine-grained PAT
+# here (one org-wide token — the block stays fleet-uniform). The
+# "Environment variables" field reaches SESSIONS only, never this setup run
+# (proven: the build log printed "auth tokens present at build: NONE" with
+# GH_PAT set in that field), so this line is the only way the snapshot build
+# can clone private marketplace repos. Per the docs this field has the SAME
+# visibility as the env-vars field, so this is not a security downgrade.
+# Re-saving after editing this field rebuilds the cache automatically.
+export GH_PAT='github_pat_REPLACE_ME'
 for d in "${CLAUDE_PROJECT_DIR:-}" "$PWD"; do
   for sub in scripts Scripts; do
     [ -n "$d" ] && [ -f "$d/$sub/cloud-setup.sh" ] &&
@@ -60,21 +69,25 @@ CLOUD_SETUP_WEB_WRAPPER
 #     snapshot; the per-session SessionStart hook then fast-paths to a no-op.
 #
 # PRIVATE marketplace auth (REQUIRED only for PRIVATE org plugin bundles):
-#   Public org marketplaces (rubio-standards@rubio, claude-lsps) install in
-#   cloud with NO token. PRIVATE in-org bundle marketplaces declared in
-#   .claude/settings.json need a GH_PAT — a fine-grained PAT (Rubio-Enterprises,
-#   Contents:Read on the private marketplace repos) set in each environment's
-#   "Environment variables" UI field. ONE shared, narrowly-scoped, read-only
-#   token reused across ALL cloud environments is sufficient: "per environment"
-#   means the GH_PAT var must be PRESENT in each environment's settings, NOT that
-#   each environment needs a DISTINCT token. The per-marketplace-repo credential
-#   helper registered below (after the apt step, once jq is available) reads it
-#   at CLONE time and is scoped so the read-only token only ever authenticates
-#   the marketplace clones, never the working repo. The cloud GitHub token is
-#   injected at SESSION start, NOT at setup time, so the helper must be a RUNTIME
-#   helper (it cannot embed a token that is not present yet). GH_PAT is a
-#   distinct name so it takes precedence over the auto-injected,
-#   working-repo-scoped GH_TOKEN for those marketplace repos.
+#   Public org marketplaces install in cloud with NO token. PRIVATE in-org
+#   bundle marketplaces declared in .claude/settings.json need GH_PAT — a
+#   fine-grained PAT (Rubio-Enterprises, Contents:Read on the private
+#   marketplace repos) EXPORTED IN THE "Setup script" WRAPPER above, NOT in
+#   the "Environment variables" field: env vars are injected into SESSIONS
+#   only, never into setup/snapshot builds — proven 2026-07 when the build
+#   diagnostic printed "auth tokens present at build: NONE" with GH_PAT set
+#   in that field — and the pre-seed clones run at BUILD time. Per the docs
+#   both fields share the same visibility ("Both environment variables and
+#   setup scripts are stored in the environment configuration, visible to
+#   anyone who can edit that environment"), so the wrapper placement is not
+#   a security downgrade. ONE shared, narrowly-scoped, read-only token
+#   reused across ALL cloud environments is sufficient. The
+#   per-marketplace-repo credential helper registered below reads it at
+#   CLONE time and is scoped so the read-only token only ever authenticates
+#   the marketplace clones, never the working repo. Do NOT put GH_PAT or
+#   GH_TOKEN in the env-vars field: GH_PAT there never reaches builds, and a
+#   user-set GH_TOKEN CLOBBERS the platform's session-injected
+#   working-repo-scoped token (observed live).
 set -uo pipefail
 
 # Operate from the repo root regardless of the caller's cwd (the UI Setup script
@@ -124,11 +137,13 @@ fi
 # GITHUB_TOKEN lets mise's aqua/github backends fetch release metadata without
 # the unauthenticated GitHub rate limit (the hook also bridges this internally;
 # belt-and-suspenders). GH_PAT is the LAST fallback so environments only ever
-# need to set GH_PAT: at snapshot time the session-injected GH_TOKEN does not
-# exist yet, and any valid token — the read-only marketplace PAT included —
-# lifts the anonymous api.github.com rate limit. (Do NOT set GH_TOKEN in the
-# environment env-vars field: the platform injects its own working-repo-scoped
-# GH_TOKEN at session start, and a user-set value would collide with it.)
+# need to provide GH_PAT (exported in the Setup-script wrapper — see the
+# header notes): at snapshot time neither the session-injected GH_TOKEN nor
+# the env-vars field exists, and any valid token — the read-only marketplace
+# PAT included — lifts the anonymous api.github.com rate limit. (Do NOT set
+# GH_TOKEN in the env-vars field: the platform injects its own
+# working-repo-scoped GH_TOKEN at session start, and a user-set value
+# clobbers it — observed live.)
 # Guarded so a greenfield render with no hook yet no-ops.
 # CLOUD_SETUP_BUILD=1 tells the repo-owned scripts/session-bootstrap.sh (run
 # by the hook) that this is the snapshot build, not a live session: its
@@ -214,9 +229,9 @@ fi
 #     helper as above: that makes them independent of global insteadOf
 #     rewrites (the in-session git proxy rewrites github.com URLs; snapshot
 #     builds differ), and since git only invokes the helper on a 401, public
-#     marketplaces still clone tokenless while private ones use GH_PAT — which
-#     IS present at setup time via the environment's env-vars field (the
-#     session-injected GH_TOKEN is not).
+#     marketplaces still clone tokenless while private ones use GH_PAT —
+#     which reaches this build ONLY via the Setup-script wrapper export (see
+#     the header notes: the env-vars field is sessions-only).
 #   * Freshness: clones refresh only when this snapshot rebuilds (CACHE_EPOCH
 #     bump or ~7-day expiry). Marketplace staleness is bounded by that; bump
 #     the epoch to pick up new plugin versions early.
@@ -305,7 +320,7 @@ EOF
     echo "cloud-setup: claude CLI not on PATH at build time; plugin caches not materialized (plugins will not load)" >&2
   fi
   [ -n "$__mkt_ok" ] && echo "cloud-setup: pre-seeded plugin marketplaces:$__mkt_ok" >&2
-  [ -n "$__mkt_bad" ] && echo "cloud-setup: marketplace pre-seed FAILED for:$__mkt_bad (private repos need GH_PAT in the environment's env vars; check network policy)" >&2
+  [ -n "$__mkt_bad" ] && echo "cloud-setup: marketplace pre-seed FAILED for:$__mkt_bad (private repos need GH_PAT exported in the Setup-script wrapper — the env-vars field does NOT reach snapshot builds; check network policy)" >&2
 fi
 
 # --- Cache warming (caching-only; safe to delete) ---------------------------
