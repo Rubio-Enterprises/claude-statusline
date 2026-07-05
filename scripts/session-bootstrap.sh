@@ -33,7 +33,7 @@ clones="$HOME/.claude/plugins/marketplaces"
 command -v jq >/dev/null 2>&1 || exit 0
 [ -f "$carrier" ] || exit 0
 
-# A marketplace is healthy only if BOTH halves of the pre-seed exist: the
+# A marketplace is healthy only if BOTH halves of its pre-seed exist: the
 # clone on disk and its entry in the registry Claude Code reads at startup.
 missing=""
 while IFS= read -r name; do
@@ -51,8 +51,27 @@ $(jq -r '
 ' "$carrier" 2>/dev/null)
 EOF
 
-if [ -n "$missing" ]; then
-  printf 'NOTE: plugin marketplaces missing from this cloud snapshot:%s — the cloud-setup pre-seed failed or the snapshot predates it, so their plugins/skills will not load. Check GH_PAT in the environment settings, then bump CACHE_EPOCH in the Setup-script wrapper and re-save to rebuild (see scripts/cloud-setup.sh).\n' "$missing"
+# A healthy marketplace is still not enough: each enabled plugin must also be
+# installed into the plugin cache, or startup resolution drops it with
+# "plugin-cache-miss" (a live-session test showed exactly this: 2 seeded
+# marketplaces, 0 plugins loaded). Only flag plugins whose marketplace IS
+# healthy — the missing ones are already reported above.
+uncached=""
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  mkt="${entry##*@}"
+  case " $missing " in *" $mkt "*) continue ;; esac
+  [ -d "$clones/$mkt/.git" ] || continue
+  [ -d "$HOME/.claude/plugins/cache/$mkt/${entry%@*}" ] || uncached="$uncached $entry"
+done <<EOF
+$(jq -r '(.enabledPlugins // {}) | to_entries[] | select(.value == true) | .key' "$carrier" 2>/dev/null)
+EOF
+
+issues=""
+[ -n "$missing" ] && issues="missing marketplaces:$missing"
+[ -n "$uncached" ] && issues="${issues:+$issues; }uncached plugins:$uncached"
+if [ -n "$issues" ]; then
+  printf 'NOTE: cloud plugin pre-seed incomplete — %s. The affected plugins/skills will not load. Check GH_PAT in the environment settings, then bump CACHE_EPOCH in the Setup-script wrapper and re-save to rebuild (see scripts/cloud-setup.sh).\n' "$issues"
 fi
 
 exit 0

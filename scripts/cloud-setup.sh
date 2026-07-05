@@ -203,8 +203,9 @@ fi
 # plugin loads. Setting SKIP_PLUGIN_MARKETPLACE=false in the environment's
 # env-vars field does NOT win over the startup context. Workaround: materialize
 # at SNAPSHOT time exactly the on-disk state the native sync would have
-# produced — one clone per marketplace plus its registry entry — so startup
-# plugin resolution finds everything already in place.
+# produced — one clone per marketplace, its registry entry, AND an installed
+# cache copy of every enabled plugin (all three layers are required) — so
+# startup plugin resolution finds everything already in place.
 #   * Mirrors Claude Code's ~/.claude/plugins layout as of 2026-07
 #     (known_marketplaces.json entry = {source, installLocation, lastUpdated});
 #     an internals change can break it. REMOVE once a fresh cloud session loads
@@ -228,6 +229,15 @@ if [ -n "$__mkt_pairs" ]; then
   __mkt_ok=""
   __mkt_bad=""
   mkdir -p "$__mkt_root" 2>/dev/null || true
+  # Which token vars actually reach the BUILD environment (names only, never
+  # values). A snapshot rebuild showed private marketplace clones failing
+  # while public ones succeeded — this line settles whether GH_PAT is
+  # injected into setup runs at all, or the token itself is being rejected.
+  __mkt_tok=""
+  [ -n "${GH_PAT:-}" ] && __mkt_tok="$__mkt_tok GH_PAT"
+  [ -n "${GH_TOKEN:-}" ] && __mkt_tok="$__mkt_tok GH_TOKEN"
+  [ -n "${GITHUB_TOKEN:-}" ] && __mkt_tok="$__mkt_tok GITHUB_TOKEN"
+  echo "cloud-setup: auth tokens present at build:${__mkt_tok:- NONE}" >&2
   # The registry must be valid JSON before jq can merge into it (merging, not
   # clobbering, preserves entries Claude Code wrote natively, e.g. the default
   # claude-plugins-official registration).
@@ -264,6 +274,36 @@ if [ -n "$__mkt_pairs" ]; then
   done <<EOF
 $__mkt_pairs
 EOF
+  # Cache materialization: registration + clone alone is NOT enough — each
+  # enabled plugin must ALSO be installed into
+  # ~/.claude/plugins/cache/<marketplace>/<plugin> or startup resolution drops
+  # it with "plugin-cache-miss ... run /plugin to refresh" (verified against
+  # the bundled CLI: with only the registry pre-seeded, sessions logged
+  # "Found 0 plugins"; after installs, "Found 19 plugins"). Use the CLI's own
+  # installer so the manifest and cache match whatever the running Claude
+  # Code version expects instead of mimicking its on-disk format. Idempotent
+  # ("already installed" no-ops); per-plugin non-fatal with a 60s cap; only
+  # plugins whose marketplace seeded OK are attempted — the rest are already
+  # reported by the marketplace summary below.
+  if command -v claude >/dev/null 2>&1; then
+    while IFS= read -r __mkt_plugin; do
+      [ -n "$__mkt_plugin" ] || continue
+      case " $__mkt_ok " in
+      *" ${__mkt_plugin##*@} "*) ;;
+      *) continue ;;
+      esac
+      timeout 60 claude plugin install "$__mkt_plugin" --scope project >/dev/null 2>&1 ||
+        __mkt_bad="$__mkt_bad $__mkt_plugin(install)"
+    done <<EOF
+$(jq -r '(.enabledPlugins // {}) | to_entries[] | select(.value == true) | .key' .claude/settings.json 2>/dev/null)
+EOF
+    # A project-scope install rewrites the carrier cosmetically (key
+    # reordering); the enable entries already exist in it, so restore the
+    # committed bytes to keep the snapshot's working tree clean.
+    git checkout -- .claude/settings.json 2>/dev/null || true
+  else
+    echo "cloud-setup: claude CLI not on PATH at build time; plugin caches not materialized (plugins will not load)" >&2
+  fi
   [ -n "$__mkt_ok" ] && echo "cloud-setup: pre-seeded plugin marketplaces:$__mkt_ok" >&2
   [ -n "$__mkt_bad" ] && echo "cloud-setup: marketplace pre-seed FAILED for:$__mkt_bad (private repos need GH_PAT in the environment's env vars; check network policy)" >&2
 fi
