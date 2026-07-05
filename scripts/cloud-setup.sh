@@ -96,19 +96,27 @@ echo "cloud-setup: building claude-statusline environment cache (epoch ${CACHE_E
 # Idempotent; non-fatal.
 git config --global url."https://github.com/".insteadOf "git@github.com:" || true
 
-# apt (root-only — cannot live in the portable hook) runs in parallel with the
-# toolchain bootstrap to stay within the cache-build time budget.
-#   gh — not pre-installed in the cloud image; some workflows need the CLI
-#        beyond the built-in GitHub tools.
-#   jq — parse the committed .claude/settings.json so the marketplace credential
-#        helper can be scoped per-repo (registered after this install finishes).
-# Non-fatal: a Setup script that exits non-zero blocks the session from
-# starting, so a transient apt blip must not abort the whole cache build.
-(
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update && apt-get install -y --no-install-recommends gh jq
-) &
-apt_pid=$!
+# apt (root-only — cannot live in the portable hook), GUARDED: jq is the only
+# apt dependency — it parses the committed .claude/settings.json so the
+# credential helper and the marketplace pre-seed can be scoped per-repo — and
+# the cloud base image has shipped it for a while now (snapshot logs showed
+# the old "gh/jq install failed" line followed by a successfully SCOPED
+# helper, which requires jq). So apt here is a fallback for a base-image
+# regression, not a routine step: most rebuilds skip the slowest, flakiest
+# network dependency entirely. gh is dropped — it never installed
+# successfully in this environment, nothing in this setup uses it, and cloud
+# sessions use the built-in GitHub tools. When the install does run it is
+# parallel with the toolchain bootstrap and non-fatal (a Setup script that
+# exits non-zero blocks the session from starting): on failure the credential
+# helper degrades to its global fallback and the pre-seed no-ops.
+apt_pid=""
+if ! command -v jq >/dev/null 2>&1; then
+  (
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends jq
+  ) &
+  apt_pid=$!
+fi
 
 # Same bootstrap the SessionStart hook runs. Installing it here bakes the pinned
 # mise toolchain into the snapshot. CLAUDE_CODE_REMOTE=true forces the hook's
@@ -122,12 +130,18 @@ apt_pid=$!
 # environment env-vars field: the platform injects its own working-repo-scoped
 # GH_TOKEN at session start, and a user-set value would collide with it.)
 # Guarded so a greenfield render with no hook yet no-ops.
+# CLOUD_SETUP_BUILD=1 tells the repo-owned scripts/session-bootstrap.sh (run
+# by the hook) that this is the snapshot build, not a live session: its
+# marketplace-health check must skip here because the pre-seed section below
+# has not run yet at this point in the build.
 if [ -f scripts/claude-session-start.sh ]; then
-  CLAUDE_CODE_REMOTE=true GITHUB_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-${GH_PAT:-}}}" \
+  CLAUDE_CODE_REMOTE=true CLOUD_SETUP_BUILD=1 GITHUB_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-${GH_PAT:-}}}" \
     bash scripts/claude-session-start.sh || true
 fi
 
-wait "$apt_pid" || echo "cloud-setup: gh/jq install failed (non-fatal; built-in GitHub tools still work; credential helper falls back to global)" >&2
+if [ -n "$apt_pid" ]; then
+  wait "$apt_pid" || echo "cloud-setup: jq install failed (non-fatal; credential helper falls back to global; marketplace pre-seed skipped)" >&2
+fi
 
 # --- Private-marketplace git credential helper (RUNTIME, repo-scoped) --------
 # Register a runtime credential helper for the PRIVATE in-org marketplace repos
