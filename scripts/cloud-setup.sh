@@ -307,7 +307,7 @@ EOF
       *" ${__mkt_plugin##*@} "*) ;;
       *) continue ;;
       esac
-      timeout 60 claude plugin install "$__mkt_plugin" --scope project >/dev/null 2>&1 ||
+      timeout 60 claude plugin install "$__mkt_plugin" --scope project </dev/null >/dev/null 2>&1 ||
         __mkt_bad="$__mkt_bad $__mkt_plugin(install)"
     done <<EOF
 $(jq -r '(.enabledPlugins // {}) | to_entries[] | select(.value == true) | .key' .claude/settings.json 2>/dev/null)
