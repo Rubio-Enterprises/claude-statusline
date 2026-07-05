@@ -86,13 +86,38 @@ npx @kamranahmedse/claude-statusline --uninstall # remove
 
 ## Test
 
-No automated test suite — the driver above is the smoke test. The package
-scripts are a lint floor and a no-op:
+No automated test suite — the driver above is the smoke test. Which linter
+verifies your change depends on which file you touched.
+
+**Touched `bin/statusline.sh` (or `driver.sh`) — it's bash, and biome does
+*not* lint bash.** shellcheck + shfmt are the floor; both pass clean on the
+current tree (a missing binary means `mise install`, they're pinned in
+`.mise.toml`):
 
 ```bash
-npm run lint   # biome check . — exit 0 (warnings/infos are non-blocking)
+mise exec -- shellcheck bin/statusline.sh   # exit 0
+mise exec -- shfmt -d bin/statusline.sh     # exit 0 — no diff means formatted
+```
+
+**Touched `bin/install.js` — it's JS, linted by biome** via the package
+script. `npm run test` is a no-op; `npm run lint` currently exits **1**, but
+*not* because of any statusline source:
+
+```bash
+npm run lint   # biome check . — exits 1, see note below
 npm run test   # prints "no automated tests…" and exits 0
 ```
+
+The single biome **error** is a pre-existing formatting drift in
+`.markdownlint-cli2.jsonc` (a Copier-template-owned config whose one-line
+`ignores` array biome would wrap at its 100-col width). This repo is a **fork**
+with the lefthook biome hook set to `stage_fixed: false`, so that rewrite is
+never auto-committed and the drift persists by design. The biome **warnings**
+on `bin/install.js` (`useTemplate`, `noConsole`) are intentional and
+non-blocking (see AGENTS.md). So a clean statusline change still shows this
+same 1-error/exit-1 — the error is pre-existing, not something you broke.
+Formatting just that one file (`npx biome format --write .markdownlint-cli2.jsonc`)
+flips the run to exit 0, but leave it — it's template config, not yours.
 
 ## Gotchas
 
@@ -116,6 +141,10 @@ npm run test   # prints "no automated tests…" and exits 0
   prefers `pnpm install` when pnpm is on `PATH`, which drops a `pnpm-lock.yaml`
   this repo doesn't track (the committed lockfile is `package-lock.json`).
   It's regenerable cruft — don't commit it.
+- **`npm run lint` exits 1 on a pristine checkout** — one pre-existing biome
+  format error in the template-owned `.markdownlint-cli2.jsonc`, not your
+  change. See Test for why, and why you leave it. The real lint for the bash
+  renderer is shellcheck + shfmt, not biome.
 
 ## Troubleshooting
 
