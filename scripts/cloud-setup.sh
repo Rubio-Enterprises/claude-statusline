@@ -115,9 +115,15 @@ apt_pid=$!
 # cloud branch (the var isn't reliably exported this early). GH_TOKEN ->
 # GITHUB_TOKEN lets mise's aqua/github backends fetch release metadata without
 # the unauthenticated GitHub rate limit (the hook also bridges this internally;
-# belt-and-suspenders). Guarded so a greenfield render with no hook yet no-ops.
+# belt-and-suspenders). GH_PAT is the LAST fallback so environments only ever
+# need to set GH_PAT: at snapshot time the session-injected GH_TOKEN does not
+# exist yet, and any valid token — the read-only marketplace PAT included —
+# lifts the anonymous api.github.com rate limit. (Do NOT set GH_TOKEN in the
+# environment env-vars field: the platform injects its own working-repo-scoped
+# GH_TOKEN at session start, and a user-set value would collide with it.)
+# Guarded so a greenfield render with no hook yet no-ops.
 if [ -f scripts/claude-session-start.sh ]; then
-  CLAUDE_CODE_REMOTE=true GITHUB_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}" \
+  CLAUDE_CODE_REMOTE=true GITHUB_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-${GH_PAT:-}}}" \
     bash scripts/claude-session-start.sh || true
 fi
 
