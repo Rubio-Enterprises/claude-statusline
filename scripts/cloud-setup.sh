@@ -142,15 +142,21 @@ wait "$apt_pid" || echo "cloud-setup: gh/jq install failed (non-fatal; built-in 
 # Idempotent (git config --global overwrites); non-fatal.
 # shellcheck disable=SC2016  # ${GH_PAT:-...} must stay literal and expand at clone time, not now
 __mkt_helper='!f(){ echo username=x-access-token; echo "password=${GH_PAT:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"; };f'
+# ONE parse of the carrier feeds BOTH the credential-helper scoping here and
+# the marketplace pre-seed section below: "<name>\t<owner/repo>" per github
+# marketplace. (The pre-seed needs the marketplace NAME — it is the on-disk
+# clone dir and the registry key — not just the repo, so extract pairs first,
+# then derive the unique repo list for the helper loop.)
+__mkt_pairs=""
 __mkt_repos=""
 if command -v jq >/dev/null 2>&1 && [ -f .claude/settings.json ]; then
-  __mkt_repos="$(jq -r '
+  __mkt_pairs="$(jq -r '
     (.extraKnownMarketplaces // {})
     | to_entries[]
-    | .value.source
-    | select(type == "object" and .source == "github" and (.repo | type == "string"))
-    | .repo
-  ' .claude/settings.json 2>/dev/null | sort -u)"
+    | select(.value.source | type == "object" and .source == "github" and (.repo | type == "string"))
+    | "\(.key)\t\(.value.source.repo)"
+  ' .claude/settings.json 2>/dev/null)"
+  __mkt_repos="$(printf '%s\n' "$__mkt_pairs" | cut -f2 | sort -u)"
 fi
 if [ -n "$__mkt_repos" ]; then
   printf '%s\n' "$__mkt_repos" | while IFS= read -r __repo; do
@@ -168,19 +174,99 @@ else
   echo "cloud-setup: global marketplace credential helper (jq/carrier unavailable; unscoped fallback)" >&2
 fi
 
+# --- Marketplace pre-seed (WORKAROUND: cloud skips native marketplace sync) --
+# Claude Code on the web now launches sessions with SKIP_PLUGIN_MARKETPLACE=true
+# in the platform startup context (observed 2026-07 in /tmp/env-manager.log
+# "startup_context_env_var_keys"). With that flag set, Claude Code never syncs
+# the carrier's extraKnownMarketplaces, so at startup EVERY enabledPlugins
+# entry is dropped as "orphaned ... marketplace not registered" and no org
+# plugin loads. Setting SKIP_PLUGIN_MARKETPLACE=false in the environment's
+# env-vars field does NOT win over the startup context. Workaround: materialize
+# at SNAPSHOT time exactly the on-disk state the native sync would have
+# produced — one clone per marketplace plus its registry entry — so startup
+# plugin resolution finds everything already in place.
+#   * Mirrors Claude Code's ~/.claude/plugins layout as of 2026-07
+#     (known_marketplaces.json entry = {source, installLocation, lastUpdated});
+#     an internals change can break it. REMOVE once a fresh cloud session loads
+#     plugins with no pre-seed (or SKIP_PLUGIN_MARKETPLACE is gone/false).
+#   * Clones run with GIT_CONFIG_GLOBAL=/dev/null plus the SAME inline runtime
+#     helper as above: that makes them independent of global insteadOf
+#     rewrites (the in-session git proxy rewrites github.com URLs; snapshot
+#     builds differ), and since git only invokes the helper on a 401, public
+#     marketplaces still clone tokenless while private ones use GH_PAT — which
+#     IS present at setup time via the environment's env-vars field (the
+#     session-injected GH_TOKEN is not).
+#   * Freshness: clones refresh only when this snapshot rebuilds (CACHE_EPOCH
+#     bump or ~7-day expiry). Marketplace staleness is bounded by that; bump
+#     the epoch to pick up new plugin versions early.
+#   * Non-fatal per marketplace; failures are named with their stage so the
+#     operator can tell a missing GH_PAT from a network-policy block.
+if [ -n "$__mkt_pairs" ]; then
+  __mkt_root="$HOME/.claude/plugins/marketplaces"
+  __mkt_reg="$HOME/.claude/plugins/known_marketplaces.json"
+  __mkt_now="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  __mkt_ok=""
+  __mkt_bad=""
+  mkdir -p "$__mkt_root" 2>/dev/null || true
+  # The registry must be valid JSON before jq can merge into it (merging, not
+  # clobbering, preserves entries Claude Code wrote natively, e.g. the default
+  # claude-plugins-official registration).
+  jq -e . "$__mkt_reg" >/dev/null 2>&1 || printf '{}\n' >"$__mkt_reg" || true
+  while IFS=$'\t' read -r __mkt_name __mkt_repo; do
+    { [ -n "$__mkt_name" ] && [ -n "$__mkt_repo" ]; } || continue
+    __mkt_dst="$__mkt_root/$__mkt_name"
+    if [ -d "$__mkt_dst/.git" ]; then
+      GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null \
+        git -C "$__mkt_dst" -c "credential.helper=$__mkt_helper" \
+        pull --ff-only --quiet >/dev/null 2>&1 || true
+    else
+      rm -rf "$__mkt_dst"
+      GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null \
+        git -c "credential.helper=$__mkt_helper" \
+        clone --quiet --depth 1 "https://github.com/${__mkt_repo}.git" "$__mkt_dst" \
+        >/dev/null 2>&1 || true
+    fi
+    if [ -d "$__mkt_dst/.git" ]; then
+      __mkt_tmp="$(mktemp)"
+      if jq --arg name "$__mkt_name" --arg repo "$__mkt_repo" \
+        --arg loc "$__mkt_dst" --arg ts "$__mkt_now" \
+        '. + {($name): {source: {source: "github", repo: $repo}, installLocation: $loc, lastUpdated: $ts}}' \
+        "$__mkt_reg" >"$__mkt_tmp" 2>/dev/null; then
+        mv "$__mkt_tmp" "$__mkt_reg" || true
+        __mkt_ok="$__mkt_ok $__mkt_name"
+      else
+        rm -f "$__mkt_tmp"
+        __mkt_bad="$__mkt_bad $__mkt_name(register)"
+      fi
+    else
+      __mkt_bad="$__mkt_bad $__mkt_name(clone)"
+    fi
+  done <<EOF
+$__mkt_pairs
+EOF
+  [ -n "$__mkt_ok" ] && echo "cloud-setup: pre-seeded plugin marketplaces:$__mkt_ok" >&2
+  [ -n "$__mkt_bad" ] && echo "cloud-setup: marketplace pre-seed FAILED for:$__mkt_bad (private repos need GH_PAT in the environment's env vars; check network policy)" >&2
+fi
+
 # --- Cache warming (caching-only; safe to delete) ---------------------------
 # Only the setup script's filesystem output is snapshotted — a session's own
 # build/test never enters the cache — so warm the archetype's dependency and
 # build caches here. All steps are non-fatal: a hiccup must not block the cache
 # build (the SessionStart hook / test runner installs on demand if anything
 # ends up missing).
-# Node/TS: warm node_modules so it lands in the
-# snapshot. Prefer the frozen-lockfile install; fall back to a plain install if
-# the lockfile is absent on this branch.
-if command -v pnpm >/dev/null 2>&1; then
+# Node/TS: warm node_modules so it lands in the snapshot. Key the package
+# manager off the COMMITTED lockfile, never PATH order: this repo is npm
+# (package-lock.json committed — see CLAUDE.md), and an unconditional
+# pnpm-first preference minted a stray pnpm-lock.yaml into the snapshot,
+# tripping the stop hook's untracked-files check in every session. Prefer the
+# frozen-lockfile install; fall back to a plain install when no lockfile is
+# committed on this branch.
+if [ -f package-lock.json ] && command -v npm >/dev/null 2>&1; then
+  (npm ci || npm install) >/dev/null 2>&1 || echo "cloud-setup: npm install failed (non-fatal)" >&2
+elif [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then
   (pnpm install --frozen-lockfile || pnpm install) >/dev/null 2>&1 || echo "cloud-setup: pnpm install failed (non-fatal)" >&2
 elif command -v npm >/dev/null 2>&1; then
-  (npm ci || npm install) >/dev/null 2>&1 || echo "cloud-setup: npm install failed (non-fatal)" >&2
+  npm install >/dev/null 2>&1 || echo "cloud-setup: npm install failed (non-fatal)" >&2
 fi
 
 # --- Drift fingerprint for the SessionStart hook ----------------------------
