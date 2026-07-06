@@ -57,8 +57,8 @@ pre-commit:
       run: mise exec -- gitleaks git --staged --redact --no-banner
     biome:
       # Renders for all ts-* archetypes (including ts-web-angular) EXCEPT when
-      # `linter_floor: oxc` (Plan 3 Task 35) — oxc consumers (e.g. karakeep)
-      # use oxlint+oxfmt as their floor and do not carry biome.json. Angular
+      # `linter_floor: oxc` (Plan 3 Task 35) — oxc consumers use oxlint+oxfmt
+      # as their floor and do not carry biome.json. Angular
       # consumers who run ESLint+Prettier alongside Biome (e.g. super-productivity)
       # accept that biome and prettier may format-fight on the same files; the
       # canonical Rubio org floor is Biome, with ESLint+Prettier as a permitted

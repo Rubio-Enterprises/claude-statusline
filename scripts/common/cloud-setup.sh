@@ -1,16 +1,25 @@
 #!/usr/bin/env bash
-# scripts/cloud-setup.sh — version-controlled reference copy of the Claude Code
-# on the web "Setup script" for claude-statusline's cloud environment.
+# scripts/common/cloud-setup.sh — TEMPLATE-OWNED core of the Claude Code on
+# the web "Setup script" for claude-statusline's cloud environment.
+#
+# OWNERSHIP (shim/common/repo-local layout): this file is rendered by the
+# rubio-standards template on every `copier update` — do NOT edit it in a
+# consumer repo (edits are template drift). The execution chain is:
+#   UI wrapper (pasted in the cloud env) → scripts/cloud-setup-shim.sh
+#   (frozen consumer entry) → THIS file (all logic) →
+#   scripts/repo-local/cloud-setup.sh (optional, repo-owned additions).
+# Repo-specific setup belongs in scripts/repo-local/cloud-setup.sh, which this
+# core runs (abort-proof) after its own work.
 #
 # This file holds the real setup logic — do NOT paste this whole file into the
 # cloud "Setup script" (web UI) field. Paste ONLY the thin wrapper between the
 # two "8<" COPY markers below: it stays version-controlled and PR-reviewed here
-# instead of pasted-and-forgotten, and it LOCATES this script at runtime rather
+# instead of pasted-and-forgotten, and it LOCATES the shim at runtime rather
 # than assuming a path (the cloud Setup script's working directory is NOT the
-# repo root, so a bare `bash scripts/cloud-setup.sh` fails with exit 127). The
-# block below is an inert heredoc — read and discarded by `:`, never executed —
-# so the wrapper is raw, ready-to-paste text: NO comment-stripping needed, just
-# copy everything between the two marker lines.
+# repo root, so a bare `bash scripts/cloud-setup-shim.sh` fails with exit 127).
+# The block below is an inert heredoc — read and discarded by `:`, never
+# executed — so the wrapper is raw, ready-to-paste text: NO comment-stripping
+# needed, just copy everything between the two marker lines.
 : <<'CLOUD_SETUP_WEB_WRAPPER'
 
 # ===== 8< ===== COPY FROM THE NEXT LINE INTO THE WEB "Setup script" FIELD =====
@@ -23,21 +32,21 @@ export CACHE_EPOCH
 # PRIVATE marketplaces: export the org's shared read-only fine-grained PAT
 # here (one org-wide token — the block stays fleet-uniform). The
 # "Environment variables" field reaches SESSIONS only, never this setup run
-# (proven: the build log printed "auth tokens present at build: NONE" with
-# GH_PAT set in that field), so this line is the only way the snapshot build
-# can clone private marketplace repos. Per the docs this field has the SAME
-# visibility as the env-vars field, so this is not a security downgrade.
+# (proven 2026-07: the build log printed "auth tokens present at build: NONE"
+# with GH_PAT set in that field), so this line is the only way the snapshot
+# build can clone private marketplace repos. Per the docs this field has the
+# SAME visibility as the env-vars field, so this is not a security downgrade.
 # Re-saving after editing this field rebuilds the cache automatically.
 export GH_PAT='github_pat_REPLACE_ME'
 for d in "${CLAUDE_PROJECT_DIR:-}" "$PWD"; do
   for sub in scripts Scripts; do
-    [ -n "$d" ] && [ -f "$d/$sub/cloud-setup.sh" ] &&
-      { cd "$d" && exec bash "$sub/cloud-setup.sh"; }
+    [ -n "$d" ] && [ -f "$d/$sub/cloud-setup-shim.sh" ] &&
+      { cd "$d" && exec bash "$sub/cloud-setup-shim.sh"; }
   done
 done
-s="$(find /home /root /workspace -maxdepth 5 -iname cloud-setup.sh -ipath '*/scripts/*' 2>/dev/null | head -n1)"
+s="$(find /home /root /workspace -maxdepth 5 -iname cloud-setup-shim.sh -ipath '*/scripts/*' 2>/dev/null | head -n1)"
 [ -n "$s" ] && { cd "$(dirname "$s")/.." && exec bash "$s"; }
-echo "cloud-setup.sh not found on this branch; SessionStart hook will bootstrap" >&2
+echo "cloud-setup-shim.sh not found on this branch; SessionStart hook will bootstrap" >&2
 # ===== 8< ===== COPY UP TO THE PREVIOUS LINE =====
 
 CLOUD_SETUP_WEB_WRAPPER
@@ -45,10 +54,12 @@ CLOUD_SETUP_WEB_WRAPPER
 # Forcing a rebuild on demand: the snapshot is rebuilt ONLY when the UI
 # Setup-script TEXT changes, when the environment's ALLOWED NETWORK HOSTS
 # change, or at the ~7-day expiry — it CANNOT see edits to THIS file, and
-# env-var changes do NOT count. So after editing this script, bump CACHE_EPOCH
-# in the UI wrapper and re-save. The SessionStart hook
-# (scripts/claude-session-start.sh) re-hashes the checked-out script against a
-# fingerprint baked into the snapshot (written at the bottom of this file to
+# env-var changes do NOT count. So after this script changes (usually via a
+# copier-sync PR), bump CACHE_EPOCH in the UI wrapper and re-save — or simply
+# wait out the ~7-day expiry. The SessionStart hook core
+# (scripts/common/session-start-claude.sh) re-hashes the checked-out
+# shim + this core against a fingerprint baked into the snapshot (written at
+# the bottom of this file to
 # ${XDG_CACHE_HOME:-$HOME/.cache}/$(basename "$repo_root")/cloud-setup.built —
 # see the drift-fingerprint note there) and surfaces a NOTE when a bump is due.
 # The hook reads that SAME runtime-basename path, so the two agree byte-for-byte.
@@ -64,37 +75,40 @@ CLOUD_SETUP_WEB_WRAPPER
 #   * Only root/apt installs, the private-marketplace git credential helper,
 #     and snapshot-cacheable warming live here.
 #   * Everything portable (the pinned mise toolchain) lives in
-#     scripts/claude-session-start.sh so it runs in BOTH local and cloud
-#     sessions. This script just calls that hook so the toolchain lands in the
-#     snapshot; the per-session SessionStart hook then fast-paths to a no-op.
+#     scripts/common/session-start-claude.sh so it runs in BOTH local and
+#     cloud sessions. This script just calls that hook core so the toolchain
+#     lands in the snapshot; the per-session SessionStart hook then
+#     fast-paths to a no-op.
 #
-# PRIVATE marketplace auth (REQUIRED only for PRIVATE org plugin bundles):
-#   Public org marketplaces install in cloud with NO token. PRIVATE in-org
-#   bundle marketplaces declared in .claude/settings.json need GH_PAT — a
-#   fine-grained PAT (Rubio-Enterprises, Contents:Read on the private
-#   marketplace repos) EXPORTED IN THE "Setup script" WRAPPER above, NOT in
-#   the "Environment variables" field: env vars are injected into SESSIONS
-#   only, never into setup/snapshot builds — proven 2026-07 when the build
-#   diagnostic printed "auth tokens present at build: NONE" with GH_PAT set
-#   in that field — and the pre-seed clones run at BUILD time. Per the docs
-#   both fields share the same visibility ("Both environment variables and
-#   setup scripts are stored in the environment configuration, visible to
-#   anyone who can edit that environment"), so the wrapper placement is not
-#   a security downgrade. ONE shared, narrowly-scoped, read-only token
-#   reused across ALL cloud environments is sufficient. The
-#   per-marketplace-repo credential helper registered below reads it at
-#   CLONE time and is scoped so the read-only token only ever authenticates
-#   the marketplace clones, never the working repo. Do NOT put GH_PAT or
-#   GH_TOKEN in the env-vars field: GH_PAT there never reaches builds, and a
-#   user-set GH_TOKEN CLOBBERS the platform's session-injected
+# PRIVATE marketplace auth (REQUIRED for PRIVATE org plugin bundles):
+#   Public org marketplaces (e.g. claude-lsps) install in cloud with NO token.
+#   PRIVATE in-org bundle marketplaces declared in .claude/settings.json —
+#   including rubio-standards@rubio now that standards is private — need
+#   GH_PAT, a fine-grained PAT (Rubio-Enterprises, Contents:Read on the
+#   private marketplace repos) EXPORTED IN THE "Setup script" WRAPPER above,
+#   NOT in the "Environment variables" field: env vars are injected into
+#   SESSIONS only, never into setup/snapshot builds — proven 2026-07 when the
+#   build diagnostic printed "auth tokens present at build: NONE" with GH_PAT
+#   set in that field — and the marketplace pre-seed clones run at BUILD
+#   time. Per the docs both fields share the same visibility ("Both
+#   environment variables and setup scripts are stored in the environment
+#   configuration, visible to anyone who can edit that environment"), so the
+#   wrapper placement is not a security downgrade. ONE shared,
+#   narrowly-scoped, read-only token reused across ALL cloud environments is
+#   sufficient. The per-marketplace-repo credential helper registered below
+#   reads it at CLONE time and is scoped so the read-only token only ever
+#   authenticates the marketplace clones, never the working repo. Do NOT put
+#   GH_PAT or GH_TOKEN in the env-vars field: GH_PAT there never reaches
+#   builds, and a user-set GH_TOKEN CLOBBERS the platform's session-injected
 #   working-repo-scoped token (observed live).
 set -uo pipefail
 
 # Operate from the repo root regardless of the caller's cwd (the UI Setup script
-# does NOT start at the repo root). Resolve from this file's own location.
+# does NOT start at the repo root). Resolve from this file's own location —
+# TWO levels up: this core lives at scripts/common/.
 src="${BASH_SOURCE[0]:-$0}"
 unset CDPATH
-repo_root="$(cd -- "$(dirname -- "$src")/.." 2>/dev/null && pwd)"
+repo_root="$(cd -- "$(dirname -- "$src")/../.." 2>/dev/null && pwd)"
 if [ -z "$repo_root" ] || ! cd -- "$repo_root"; then
   echo "cloud-setup: cannot resolve repo root from $src; skipping" >&2
   exit 0
@@ -117,7 +131,7 @@ git config --global url."https://github.com/".insteadOf "git@github.com:" || tru
 # helper, which requires jq). So apt here is a fallback for a base-image
 # regression, not a routine step: most rebuilds skip the slowest, flakiest
 # network dependency entirely. gh is dropped — it never installed
-# successfully in this environment, nothing in this setup uses it, and cloud
+# successfully in the cloud image, nothing in this setup uses it, and cloud
 # sessions use the built-in GitHub tools. When the install does run it is
 # parallel with the toolchain bootstrap and non-fatal (a Setup script that
 # exits non-zero blocks the session from starting): on failure the credential
@@ -140,18 +154,14 @@ fi
 # need to provide GH_PAT (exported in the Setup-script wrapper — see the
 # header notes): at snapshot time neither the session-injected GH_TOKEN nor
 # the env-vars field exists, and any valid token — the read-only marketplace
-# PAT included — lifts the anonymous api.github.com rate limit. (Do NOT set
-# GH_TOKEN in the env-vars field: the platform injects its own
-# working-repo-scoped GH_TOKEN at session start, and a user-set value
-# clobbers it — observed live.)
+# PAT included — lifts the anonymous api.github.com rate limit.
+# CLOUD_SETUP_BUILD=1 tells the hook's cloud plugin health check that this is
+# the snapshot build, not a live session: it must skip here because the
+# marketplace pre-seed section below has not run yet at this point.
 # Guarded so a greenfield render with no hook yet no-ops.
-# CLOUD_SETUP_BUILD=1 tells the repo-owned scripts/session-bootstrap.sh (run
-# by the hook) that this is the snapshot build, not a live session: its
-# marketplace-health check must skip here because the pre-seed section below
-# has not run yet at this point in the build.
-if [ -f scripts/claude-session-start.sh ]; then
+if [ -f scripts/common/session-start-claude.sh ]; then
   CLAUDE_CODE_REMOTE=true CLOUD_SETUP_BUILD=1 GITHUB_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-${GH_PAT:-}}}" \
-    bash scripts/claude-session-start.sh || true
+    bash scripts/common/session-start-claude.sh || true
 fi
 
 if [ -n "$apt_pid" ]; then
@@ -160,9 +170,9 @@ fi
 
 # --- Private-marketplace git credential helper (RUNTIME, repo-scoped) --------
 # Register a runtime credential helper for the PRIVATE in-org marketplace repos
-# ONLY, so Claude Code's native marketplace clone (at SESSION start — the token
-# is injected then, not now) authenticates with the read-only GH_PAT while the
-# WORKING repo keeps using its own session-injected token. The repos are derived
+# ONLY, so the marketplace pre-seed's clones (next section) authenticate with
+# the read-only GH_PAT while the WORKING repo keeps using its own
+# session-injected token. The repos are derived
 # from the committed carrier's extraKnownMarketplaces (github sources); BOTH the
 # bare and ".git" clone-URL forms are registered because git credential
 # URL-matching is exact, not suffix-tolerant. Scoping is per-REPO — never a
@@ -245,9 +255,8 @@ if [ -n "$__mkt_pairs" ]; then
   __mkt_bad=""
   mkdir -p "$__mkt_root" 2>/dev/null || true
   # Which token vars actually reach the BUILD environment (names only, never
-  # values). A snapshot rebuild showed private marketplace clones failing
-  # while public ones succeeded — this line settles whether GH_PAT is
-  # injected into setup runs at all, or the token itself is being rejected.
+  # values): settles instantly whether GH_PAT made it into this build or the
+  # token itself is being rejected.
   __mkt_tok=""
   [ -n "${GH_PAT:-}" ] && __mkt_tok="$__mkt_tok GH_PAT"
   [ -n "${GH_TOKEN:-}" ] && __mkt_tok="$__mkt_tok GH_TOKEN"
@@ -329,31 +338,44 @@ fi
 # build caches here. All steps are non-fatal: a hiccup must not block the cache
 # build (the SessionStart hook / test runner installs on demand if anything
 # ends up missing).
-# Node/TS: warm node_modules so it lands in the snapshot. Key the package
-# manager off the COMMITTED lockfile, never PATH order: this repo is npm
-# (package-lock.json committed — see CLAUDE.md), and an unconditional
-# pnpm-first preference minted a stray pnpm-lock.yaml into the snapshot,
-# tripping the stop hook's untracked-files check in every session. Prefer the
-# frozen-lockfile install; fall back to a plain install when no lockfile is
-# committed on this branch.
+# Node/TS: warm node_modules so it lands in the
+# snapshot. Key the package manager off the COMMITTED lockfile, never PATH
+# order: an unconditional pnpm-first preference minted a stray pnpm-lock.yaml
+# into an npm repo's snapshot, tripping the stop hook's untracked-files check
+# in every session. Prefer the frozen-lockfile install; fall back to a plain
+# install when no lockfile is committed on this branch.
 if [ -f package-lock.json ] && command -v npm >/dev/null 2>&1; then
   (npm ci || npm install) >/dev/null 2>&1 || echo "cloud-setup: npm install failed (non-fatal)" >&2
 elif [ -f pnpm-lock.yaml ] && command -v pnpm >/dev/null 2>&1; then
   (pnpm install --frozen-lockfile || pnpm install) >/dev/null 2>&1 || echo "cloud-setup: pnpm install failed (non-fatal)" >&2
+elif command -v pnpm >/dev/null 2>&1; then
+  pnpm install >/dev/null 2>&1 || echo "cloud-setup: pnpm install failed (non-fatal)" >&2
 elif command -v npm >/dev/null 2>&1; then
   npm install >/dev/null 2>&1 || echo "cloud-setup: npm install failed (non-fatal)" >&2
 fi
 
+# --- Repo-local additions (scripts/repo-local/cloud-setup.sh) ----------------
+# REPO-OWNED, committed, never rendered by the template — the consumer's own
+# cloud setup (extra apt packages, bespoke prefetch, a dockerd warm, ...) runs
+# HERE, after the template-owned work above, with the same non-fatal contract.
+# Absent the file this is a zero-cost no-op.
+if [ -f scripts/repo-local/cloud-setup.sh ]; then
+  bash scripts/repo-local/cloud-setup.sh || echo "cloud-setup: scripts/repo-local/cloud-setup.sh failed (non-fatal)" >&2
+fi
+
 # --- Drift fingerprint for the SessionStart hook ----------------------------
-# Snapshot-persisted sha256 of THIS script + the epoch it built under. The
-# per-session hook re-hashes the checked-out script and warns when they differ
-# (cloud-setup.sh edited but CACHE_EPOCH not bumped -> stale snapshot). The
-# platform can't detect this: the cache keys off the UI wrapper text. Non-fatal.
+# Snapshot-persisted sha256 of the SHIM + THIS core (concatenated) + the epoch
+# it built under. The per-session hook core re-hashes the checked-out pair and
+# warns when they differ (a copier-sync PR updated this core but the snapshot
+# predates it -> stale snapshot until CACHE_EPOCH bump / wrapper re-save /
+# ~7-day expiry). The platform can't detect this: the cache keys off the UI
+# wrapper text. Non-fatal.
 #
 # CACHE-KEY CONVENTION (coherence-critical — do NOT change to {{ project_name }}):
 # the marker is keyed on the RUNTIME checked-out directory name,
 # $(basename "$repo_root"), NOT the copier `project_name` answer. The rendered
-# SessionStart hook (scripts/claude-session-start.sh, from S-1) derives its
+# SessionStart hook core (scripts/common/session-start-claude.sh, from S-1)
+# derives its
 # drift-NOTE path the SAME way — $(basename "$repo_root") — so the path this
 # script WRITES and the path the hook READS are byte-identical regardless of
 # whether project_name happens to match the checkout-dir name. Keying either
@@ -366,7 +388,7 @@ marker_dir="${XDG_CACHE_HOME:-$HOME/.cache}/$(basename "$repo_root")"
 if mkdir -p "$marker_dir" 2>/dev/null; then
   {
     printf 'epoch=%s\n' "${CACHE_EPOCH:-unset}"
-    printf 'sha256=%s\n' "$(sha256sum scripts/cloud-setup.sh 2>/dev/null | awk '{print $1}')"
+    printf 'sha256=%s\n' "$(cat scripts/cloud-setup-shim.sh scripts/common/cloud-setup.sh 2>/dev/null | sha256sum | awk '{print $1}')"
   } >"$marker_dir/cloud-setup.built" 2>/dev/null || true
 fi
 
