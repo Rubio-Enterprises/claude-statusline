@@ -202,7 +202,7 @@ jobs:
           # Conservative CI concurrency floor for monorepo build tools. A turbo
           # repo's `typecheck` script spawns one tsc per package; at turbo's
           # default (~all cores) a large workspace OOM-kills the 16 GB runner
-          # (e.g. karakeep's 23-package monorepo). tsc/astro ignore this env;
+          # (e.g. a large multi-package monorepo). tsc/astro ignore this env;
           # turbo honors it; a repo's explicit `--concurrency` flag overrides it.
           # Authoritative per-repo tuning belongs in the consumer-owned
           # package.json `typecheck` script — this is only a fleet-wide floor.
