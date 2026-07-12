@@ -332,6 +332,66 @@ EOF
   [ -n "$__mkt_bad" ] && echo "cloud-setup: marketplace pre-seed FAILED for:$__mkt_bad (private repos need GH_PAT exported in the Setup-script wrapper — the env-vars field does NOT reach snapshot builds; check network policy)" >&2
 fi
 
+# --- Workflow seeding (opt-in via a .claude-plugin/seed-workflows marker) ---
+# Claude Code plugins cannot ship Workflow-tool scripts as a native component,
+# and the user-scope ~/.claude/ directory never reaches cloud sessions — so a
+# plugin that carries workflow .js files as inert payload (e.g. the
+# claude-workflows content-vehicle plugin) needs this last-mile bridge: copy
+# its workflows/<audience>/*.js flat into ~/.claude/workflows/ at SNAPSHOT
+# time, where session-start name discovery finds them natively (same
+# pre-seed-at-build / health-NOTE-at-session-start principle as the
+# marketplace pre-seed above; the hook's clause 5c is the health side).
+#   * STRICTLY opt-in: a plugin is seeded ONLY if it ships an (empty)
+#     .claude-plugin/seed-workflows flag file. A workflows/ dir alone means
+#     nothing — third-party plugins in the carrier must never be able to
+#     inject scripts into the workflow namespace by coincidence, nor collide
+#     with a future native plugin-workflow feature.
+#   * Every audience dir in the payload ships (workflows/*/*.js): the cloud
+#     workspace is treated as a personal workspace by invariant; audience
+#     selection is a local-machine concern (the dotfiles reconciler's gates).
+#   * Runs AFTER the marketplace pre-seed: it reads the plugin cache that
+#     `claude plugin install` just materialized. Both cache layouts are
+#     handled (cache/<mkt>/<plugin>/ and cache/<mkt>/<plugin>/<version>/).
+#   * Flat copy (not symlink — the copy must not dangle if the cache moves),
+#     first-wins on filename collision, duplicate-meta.name warning mirrors
+#     the dotfiles reconciler. Non-fatal throughout.
+__wf_cache="$HOME/.claude/plugins/cache"
+__wf_dst="$HOME/.claude/workflows"
+__wf_seeded=""
+__wf_skipped=""
+if [ -d "$__wf_cache" ]; then
+  for __wf_marker in "$__wf_cache"/*/*/.claude-plugin/seed-workflows \
+    "$__wf_cache"/*/*/*/.claude-plugin/seed-workflows; do
+    [ -f "$__wf_marker" ] || continue
+    __wf_root="${__wf_marker%/.claude-plugin/seed-workflows}"
+    for __wf_src in "$__wf_root"/workflows/*/*.js; do
+      [ -f "$__wf_src" ] || continue
+      mkdir -p "$__wf_dst" 2>/dev/null || true
+      __wf_base="$(basename "$__wf_src")"
+      if [ -e "$__wf_dst/$__wf_base" ]; then
+        cmp -s "$__wf_src" "$__wf_dst/$__wf_base" || __wf_skipped="$__wf_skipped $__wf_base"
+        continue
+      fi
+      if cp "$__wf_src" "$__wf_dst/$__wf_base" 2>/dev/null; then
+        __wf_seeded="$__wf_seeded $__wf_base"
+      fi
+    done
+  done
+  if [ -n "$__wf_seeded" ]; then
+    # Duplicate meta.name check over everything now in the workflow dir —
+    # runtime resolution is by meta.name, so a duplicate is nondeterministic.
+    __wf_dupes="$(
+      for __wf_f in "$__wf_dst"/*.js; do
+        [ -e "$__wf_f" ] || continue
+        sed -n "s/^[[:space:]]*name:[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$__wf_f" | head -n 1
+      done | sort | uniq -d | tr '\n' ' '
+    )"
+    [ -n "${__wf_dupes// /}" ] && echo "cloud-setup: WARNING duplicate workflow meta.name(s): $__wf_dupes— resolution is ambiguous, rename one at its source" >&2
+    echo "cloud-setup: seeded workflows:$__wf_seeded" >&2
+  fi
+  [ -n "$__wf_skipped" ] && echo "cloud-setup: workflow seeding skipped (existing different file):$__wf_skipped" >&2
+fi
+
 # --- Cache warming (caching-only; safe to delete) ---------------------------
 # Only the setup script's filesystem output is snapshotted — a session's own
 # build/test never enters the cache — so warm the archetype's dependency and

@@ -7,8 +7,8 @@
 # package.json devDep, but Pattern E preserves the consumer's package.json
 # (`_skip_if_exists`), so the assumption broke. mise pinning is the consistent
 # audit-side contract — same as how gitleaks/conftest/check-jsonschema work.
-"npm:@commitlint/cli" = "21.0.2"
-"npm:@commitlint/config-conventional" = "21.0.2"
+"npm:@commitlint/cli" = "21.2.0"
+"npm:@commitlint/config-conventional" = "21.2.0"
 
 # Hook tools backing lefthook.yml. Universal across archetypes — every
 # archetype's lefthook runs markdownlint/yamllint/prettier and most run
@@ -17,8 +17,8 @@
 # without polluting the developer's global tool surface).
 "aqua:koalaman/shellcheck" = "0.11.0"
 "aqua:mvdan/sh"            = "3.13.1"   # shfmt
-"npm:markdownlint-cli2"    = "0.22.1"
-"npm:prettier"             = "3.8.4"
+"npm:markdownlint-cli2"    = "0.23.0"
+"npm:prettier"             = "3.9.4"
 "pipx:yamllint"            = "1.38.0"
 # lefthook binary itself. The lint-hooks CI job runs `mise exec -- lefthook
 # run pre-commit --all-files`, which requires lefthook on PATH from mise (the
@@ -42,11 +42,13 @@
 # 127 (command not found). Pinning here lands it on the mise PATH for both CI
 # and local `copier update` parity. The reusable workflow also installs copier
 # explicitly as belt-and-braces for consumers not yet re-rendered with this pin.
-"pipx:copier"                = "9.15.2"
-# Biome 2.x — TS archetypes (including ts-web-angular). The lefthook `biome`
-# command uses `npx biome` (consumer-owned devDep), but mise pinning here
-# documents the org-floor version + lands the binary on PATH for `mise exec`
-# invocations. Also pinned for any non-TS archetype when has_embedded_web=true
+"pipx:copier"                = "9.16.0"
+# Biome 2.x — TS archetypes (including ts-web-angular). This pin is
+# LOAD-BEARING: both the lefthook `biome` pre-commit hook and the lint-format
+# CI gate invoke `mise exec -- biome`, resolving this exact version. (The hook
+# previously used bare `npx biome`, which silently resolved the abandoned npm
+# registry package named `biome` whenever no consumer devDep was installed.)
+# Also pinned for any non-TS archetype when has_embedded_web=true
 # so the embedded web surface (JS/JSX/TS/CSS) gets the same Biome floor as a
 # standalone ts-* repo (e.g. vibetunnel Swift + Node, todoist-classify Python +
 # React/JSX).
@@ -59,7 +61,7 @@
 # want Biome alongside ESLint (e.g. super-productivity's `scripts.lint: "biome
 # check ."`). Consumers who don't want Biome can delete biome.json; `_skip_if_exists`
 # keeps it from coming back on `copier update`.
-"npm:@biomejs/biome"       = "2.5.0"
+"npm:@biomejs/biome"       = "2.5.2"
 # TS archetypes: tasks delegate to package.json scripts (the consumer owns
 # package.json per Pattern A/D / _skip_if_exists). The audit Layer B JSON
 # Schema enforces that lint, test, e2e exist in scripts; this contract makes
@@ -79,8 +81,15 @@ run = ["npm run lint"]
 # above only runs `npm run lint`, which historically did NOT run tsc — this is
 # the task that makes `mise run typecheck` a uniform local invocation matching
 # the CI gate.
+# --if-present: this task renders for EVERY ts-* archetype, but the
+# ensure-pkg-typecheck-script.sh hook (and package-json.schema.json) only add/
+# require scripts.typecheck when `typescript` is an actual (dev)dependency. A
+# JS-only ts-* repo (fleet-live: the claude-statusline fork) otherwise
+# hard-fails the typecheck gate on `npm error Missing script: "typecheck"`
+# with nothing to typecheck. Layer B still requires the script wherever
+# typescript IS a dependency, so this cannot mask a missing check there.
 description = "Delegates to scripts.typecheck in package.json (tsc --noEmit; `astro check` for astro repos)"
-run = ["npm run typecheck"]
+run = ["npm run --if-present typecheck"]
 
 [tasks.test]
 description = "Delegates to scripts.test in package.json"

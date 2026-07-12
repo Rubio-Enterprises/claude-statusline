@@ -232,7 +232,36 @@ EOF
   [ -n "$__mkt_uncached" ] && __mkt_issues="${__mkt_issues:+$__mkt_issues; }uncached plugins:$__mkt_uncached"
   [ -n "$__mkt_issues" ] && plugin_note=" NOTE: cloud plugin pre-seed incomplete — ${__mkt_issues}. The affected plugins/skills will not load. Ensure GH_PAT is exported in the Setup-script WRAPPER (the env-vars field does not reach snapshot builds), then re-save the wrapper to rebuild (see scripts/common/cloud-setup.sh)."
 fi
-drift_note="${drift_note}${plugin_note}"
+
+# (5c) Cloud workflow-seeding health check. cloud-setup.sh's "Workflow
+# seeding" section copies workflows/<audience>/*.js from any marker-carrying
+# plugin in the cache (an empty .claude-plugin/seed-workflows flag file is the
+# opt-in) into ~/.claude/workflows/ at snapshot-build time, so the Workflow
+# tool resolves them by meta.name in cloud sessions. Every failure mode there
+# is non-fatal by design, so an incomplete seed (snapshot predating the
+# clause, a plugin cache install that failed, a filename collision that
+# skipped a copy) would otherwise surface only as a silently unresolvable
+# workflow name. Verify: every payload .js of every marked cached plugin has
+# a same-named file in ~/.claude/workflows/. Cloud-only, same gates as 5b.
+workflow_note=""
+if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] && [ -z "${CLOUD_SETUP_BUILD:-}" ]; then
+  __wf_missing=""
+  __wf_cache="$HOME/.claude/plugins/cache"
+  if [ -d "$__wf_cache" ]; then
+    for __wf_marker in "$__wf_cache"/*/*/.claude-plugin/seed-workflows \
+      "$__wf_cache"/*/*/*/.claude-plugin/seed-workflows; do
+      [ -f "$__wf_marker" ] || continue
+      __wf_root="${__wf_marker%/.claude-plugin/seed-workflows}"
+      for __wf_src in "$__wf_root"/workflows/*/*.js; do
+        [ -f "$__wf_src" ] || continue
+        [ -f "$HOME/.claude/workflows/$(basename "$__wf_src")" ] ||
+          __wf_missing="$__wf_missing $(basename "$__wf_src")"
+      done
+    done
+  fi
+  [ -n "$__wf_missing" ] && workflow_note=" NOTE: cloud workflow seeding incomplete — missing from ~/.claude/workflows:${__wf_missing}. Those workflow names will not resolve. The snapshot likely predates the seeding clause in scripts/common/cloud-setup.sh — bump CACHE_EPOCH in the Setup-script wrapper and re-save to rebuild."
+fi
+drift_note="${drift_note}${plugin_note}${workflow_note}"
 
 # (6) SessionStart stdout becomes Claude's context — one concise, archetype-aware
 # line. The drift NOTE (if any) is appended.
