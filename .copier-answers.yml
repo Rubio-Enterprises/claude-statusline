@@ -7,6 +7,7 @@ default_branch: main
 has_codex_plugin: false
 has_e2e: false
 has_lint_hooks: true
+has_test: false
 is_fork: true
 is_mcp_server: false
 is_monorepo: false
