@@ -37,3 +37,5 @@ If you had a previous statusline, it restores it from the backup. Otherwise it r
 ## License
 
 MIT
+
+<!-- lint-format soak probe: facet-based biome decision (.github#114); PR closes unmerged -->
