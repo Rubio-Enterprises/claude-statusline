@@ -7,7 +7,7 @@ default_branch: main
 has_codex_plugin: false
 has_e2e: false
 has_go: false
-has_javascript: false
+has_javascript: true
 has_lint_hooks: true
 has_python: false
 has_rust: false
