@@ -43,7 +43,8 @@
 # and local `copier update` parity. The reusable workflow also installs copier
 # explicitly as belt-and-braces for consumers not yet re-rendered with this pin.
 "pipx:copier"                = "9.16.0"
-# Biome 2.x — TS archetypes (including ts-web-angular). This pin is
+# Biome 2.x — JS/TS language facets (has_javascript or has_typescript,
+# including ts-web-angular). This pin is
 # LOAD-BEARING: both the lefthook `biome` pre-commit hook and the lint-format
 # CI gate invoke `mise exec -- biome`, resolving this exact version. (The hook
 # previously used bare `npx biome`, which silently resolved the abandoned npm
