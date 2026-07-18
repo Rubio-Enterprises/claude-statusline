@@ -1,6 +1,6 @@
 # Changes here will be overwritten by Copier; NEVER edit this file manually.
-_commit: template/v1.55.14
-_rubio_template_version: template/v1.55.14
+_commit: template/v1.55.15
+_rubio_template_version: template/v1.55.15
 _src_path: https://github.com/Rubio-Enterprises/standards.git
 archetype: ts-cli
 default_branch: main
@@ -9,6 +9,7 @@ has_e2e: false
 has_go: false
 has_javascript: true
 has_lint_hooks: true
+has_playwright: true
 has_python: false
 has_rust: false
 has_swift: false
