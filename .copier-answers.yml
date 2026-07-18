@@ -13,7 +13,7 @@ has_python: false
 has_rust: false
 has_swift: false
 has_test: false
-has_typescript: true
+has_typescript: false
 is_fork: true
 is_mcp_server: false
 is_monorepo: false
