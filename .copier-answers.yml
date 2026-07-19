@@ -1,6 +1,6 @@
 # Changes here will be overwritten by Copier; NEVER edit this file manually.
-_commit: template/v1.55.21
-_rubio_template_version: template/v1.55.21
+_commit: template/v1.55.22
+_rubio_template_version: template/v1.55.22
 _src_path: https://github.com/Rubio-Enterprises/standards.git
 container_registry: ghcr.io/Rubio-Enterprises
 default_branch: main
@@ -33,6 +33,7 @@ is_public: true
 linter_floor: biome
 node_version: 22.12.0
 project_name: claude-statusline
+repo_type: extended_fork
 tier: experimental
 upstream_branch: main
 upstream_url: https://github.com/kamranahmedse/claude-statusline
