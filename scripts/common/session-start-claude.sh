@@ -263,8 +263,9 @@ if [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] && [ -z "${CLOUD_SETUP_BUILD:-}" ]; th
 fi
 drift_note="${drift_note}${plugin_note}${workflow_note}"
 
-# (6) SessionStart stdout becomes Claude's context — one concise, archetype-aware
-# line. The drift NOTE (if any) is appended.
+# (6) SessionStart stdout becomes Claude's context — one concise, stack-aware
+# line (first matching stack facet wins; ts-first keeps polyglot repos on the
+# message their primary package.json workflow implies). The drift NOTE (if any) is appended.
 # shellcheck disable=SC2016
 printf 'claude-statusline dev toolchain ready (mise): biome, lefthook, shellcheck, shfmt, gitleaks, prettier, yq on PATH. Use `mise run build/test/lint` (or the package.json scripts).%s\n' "$drift_note"
 
