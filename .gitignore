@@ -42,7 +42,7 @@ reports/
 !.claude/agents/
 !.claude/skills/
 
-# Per-archetype
+# Per-stack
 .next/
 .vite/
 .turbo/
