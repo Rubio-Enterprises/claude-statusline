@@ -1,12 +1,21 @@
 # Changes here will be overwritten by Copier; NEVER edit this file manually.
-_commit: template/v1.55.20
-_rubio_template_version: template/v1.55.20
+_commit: template/v1.55.21
+_rubio_template_version: template/v1.55.21
 _src_path: https://github.com/Rubio-Enterprises/standards.git
-archetype: ts-cli
+container_registry: ghcr.io/Rubio-Enterprises
 default_branch: main
+enforce_audit: true
+enforce_e2e: false
+enforce_lint_format: true
+enforce_lint_hooks: true
+enforce_tests: false
+enforce_typecheck: true
+enforcement_tier: experimental
+has_ansible: false
 has_codex_plugin: false
 has_e2e: false
 has_go: false
+has_homebrew_formulae: false
 has_javascript: true
 has_lint_hooks: true
 has_playwright: true
