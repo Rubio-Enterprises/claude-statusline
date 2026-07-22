@@ -46,6 +46,21 @@ format_tokens() {
   fi
 }
 
+# Compact a context-window size for the model badge: 1000000 → "1m",
+# 1500000 → "1.5m", 200000 → "200k". A whole number drops its ".0" so a
+# suffix derived from the window size matches the "(1M context)" style
+# already parsed verbatim out of display names.
+format_ctx_size() {
+  local num=$1
+  if [ "$num" -ge 1000000 ]; then
+    awk "BEGIN {v = $num / 1000000; if (v == int(v)) printf \"%dm\", v; else printf \"%.1fm\", v}"
+  elif [ "$num" -ge 1000 ]; then
+    awk "BEGIN {v = $num / 1000; if (v == int(v)) printf \"%dk\", v; else printf \"%.0fk\", v}"
+  else
+    printf "%d" "$num"
+  fi
+}
+
 color_for_pct() {
   local pct=$1
   if [ "$pct" -ge 90 ]; then
@@ -163,21 +178,26 @@ format_reset_time() {
 }
 
 # ── Extract JSON data ───────────────────────────────────
-# Shorten the display name to an id-like token: lowercase, split off a
-# "(… context)" suffix as "[…]" first (so dots inside the size survive, e.g.
-# 1.5M → [1.5m]), then hyphenate the spaces/dots in the remaining name.
-# "Opus 4.8 (1M context)" → "opus-4-8[1m]"; "Opus 4.8" → "opus-4-8".
+# Shorten the display name to an id-like token: lowercase, drop any redundant
+# "(… context)" tail (Opus's distinct 1M model carries one; without this it
+# would hyphenate into the name as "opus-4-8-(1m-context)"), then hyphenate
+# the spaces/dots in what remains. The context badge itself is NOT read from
+# the name — it comes from context_window_size below, the single source of
+# truth. The regex stays narrow (only "(… context)") so a future qualifier
+# like "(Preview)" survives.
 model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"' | tr '[:upper:]' '[:lower:]')
-model_ctx=""
-ctx_re='\(([^[:space:])]+)[[:space:]]context\)$'
-if [[ "$model_name" =~ $ctx_re ]]; then
-  model_ctx="[${BASH_REMATCH[1]}]"
-  model_name=${model_name%%(*}
-fi
-model_name="$(echo "$model_name" | sed -E 's/[[:space:]]+$//; s/[ .]/-/g')${model_ctx}"
+ctx_re='\([^[:space:])]+[[:space:]]context\)$'
+[[ "$model_name" =~ $ctx_re ]] && model_name=${model_name%%(*}
+model_name="$(echo "$model_name" | sed -E 's/[[:space:]]+$//; s/[ .]/-/g')"
 
 size=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
 [ "$size" -eq 0 ] 2>/dev/null && size=200000
+
+# Badge the context window when it exceeds the 200k default — "[1m]" for a 1M
+# session (Opus's 1M model or Sonnet's 1M beta alike), nothing for a standard
+# one. Deriving from context_window_size keeps the badge in lockstep with the
+# same value the context-usage % meters against.
+[ "$size" -gt 200000 ] 2>/dev/null && model_name+="[$(format_ctx_size "$size")]"
 
 input_tokens=$(echo "$input" | jq -r '.context_window.current_usage.input_tokens // 0')
 cache_create=$(echo "$input" | jq -r '.context_window.current_usage.cache_creation_input_tokens // 0')
