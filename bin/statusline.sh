@@ -22,6 +22,7 @@ cyan='\033[36m'
 red='\033[31m'
 bred='\033[91m' # bright red (slot 9) — top effort tier
 yellow='\033[33m'
+white='\033[37m'
 magenta='\033[35m'
 dim='\033[2m'
 default_fg='\033[39m'
@@ -47,16 +48,14 @@ format_tokens() {
 
 color_for_pct() {
   local pct=$1
-  if [ "$pct" -ge 95 ]; then
+  if [ "$pct" -ge 90 ]; then
     printf '%b' "$red"
-  elif [ "$pct" -ge 85 ]; then
-    printf '%b' "$orange"
   elif [ "$pct" -ge 70 ]; then
     printf '%b' "$yellow"
   elif [ "$pct" -ge 50 ]; then
-    printf '%b' "$cyan"
+    printf '%b' "$orange"
   else
-    printf '%b' "${dim}${default_fg}"
+    printf '%b' "$green"
   fi
 }
 
@@ -500,7 +499,7 @@ if [ -n "$five_pct" ]; then
   five_reset_fmt=$(format_reset_time "$five_reset" "time")
   five_bar=$(build_bar "$five_n" "$bar_width")
   five_color=$(color_for_pct "$five_n")
-  rate_lines+="${cyan}cur.${reset} ${five_bar} ${five_color}${five_n}%${reset} ${dim}${default_fg}${five_reset_fmt}${reset}"
+  rate_lines+="${white}cur.${reset} ${five_bar} ${five_color}${five_n}%${reset} ${white}${five_reset_fmt}${reset}"
 fi
 
 if [ -n "$seven_pct" ]; then
@@ -509,7 +508,7 @@ if [ -n "$seven_pct" ]; then
   seven_bar=$(build_bar "$seven_n" "$bar_width")
   seven_color=$(color_for_pct "$seven_n")
   [ -n "$rate_lines" ] && rate_lines+="${sep}"
-  rate_lines+="${magenta}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${dim}${default_fg}${seven_reset_fmt}${reset}"
+  rate_lines+="${white}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${white}${seven_reset_fmt}${reset}"
 fi
 
 # ── Output ──────────────────────────────────────────────
