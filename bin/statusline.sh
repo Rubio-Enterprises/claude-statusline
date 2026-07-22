@@ -142,16 +142,19 @@ format_reset_time() {
   local result=""
   case "$style" in
   time)
-    result=$(date -j -r "$epoch" +"%l:%M%p" 2>/dev/null | sed 's/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
-    [ -z "$result" ] && result=$(date -d "@$epoch" +"%l:%M%P" 2>/dev/null | sed 's/^ //; s/\.//g')
+    result=$(date -j -r "$epoch" +"%l:%M%p" 2>/dev/null)
+    [ -z "$result" ] && result=$(date -d "@$epoch" +"%l:%M%P" 2>/dev/null)
+    result=$(echo "$result" | sed 's/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
     ;;
   datetime)
-    result=$(date -j -r "$epoch" +"%a %-m/%-d @ %l:%M%p" 2>/dev/null | sed 's/  / /g; s/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
-    [ -z "$result" ] && result=$(date -d "@$epoch" +"%a %-m/%-d @ %l:%M%P" 2>/dev/null | sed 's/  / /g; s/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
+    result=$(date -j -r "$epoch" +"%a %-m/%-d @ %l:%M%p" 2>/dev/null)
+    [ -z "$result" ] && result=$(date -d "@$epoch" +"%a %-m/%-d @ %l:%M%P" 2>/dev/null)
+    result=$(echo "$result" | sed 's/  / /g; s/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
     ;;
   *)
-    result=$(date -j -r "$epoch" +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    result=$(date -j -r "$epoch" +"%b %-d" 2>/dev/null)
     [ -z "$result" ] && result=$(date -d "@$epoch" +"%b %-d" 2>/dev/null)
+    result=$(echo "$result" | tr '[:upper:]' '[:lower:]')
     ;;
   esac
   printf "%s" "$result"
@@ -199,7 +202,7 @@ if [ -f "$settings_path" ]; then
   effort=$(jq -r '.effortLevel // "default"' "$settings_path" 2>/dev/null)
 fi
 
-# ── LINE 1: Model │ Context % │ Directory (branch) │ Session │ Thinking ──
+# ── LINE 1: Model │ Context % │ Directory (branch) │ Session │ Effort ──
 pct_color=$(color_for_pct "$pct_used")
 cwd=$(echo "$input" | jq -r '.cwd // ""')
 [ -z "$cwd" ] || [ "$cwd" = "null" ] && cwd=$(pwd)
@@ -224,7 +227,7 @@ if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 
   # Tally working-tree state from porcelain v1 ("XY path"). A file can be both
   # staged (X) and modified (Y) — e.g. "MM" — so it counts in both columns.
-  porcelain=$(git -C "$cwd" status --porcelain 2>/dev/null)
+  porcelain=$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)
   if [ -n "$porcelain" ]; then
     n_staged=0
     n_modified=0
@@ -265,6 +268,12 @@ if [ -n "$session_start" ] && [ "$session_start" != "null" ]; then
   fi
 fi
 
+skip_perms=""
+parent_cmd=$(ps -o args= -p "$PPID" 2>/dev/null)
+if [[ "$parent_cmd" == *"--dangerously-skip-permissions"* ]]; then
+  skip_perms="⚡  "
+fi
+
 model_color=$(color_for_model "$model_name")
 line1="${model_color}${model_name}${reset}"
 line1+="${sep}"
@@ -281,7 +290,7 @@ auto) line1+="${cyan}◎ ${effort}${reset}" ;;
 *) line1+="${dim}⠆ ${effort}${reset}" ;;
 esac
 line1+="${sep}"
-line1+="${cyan}${dirname}${reset}"
+line1+="${skip_perms}${cyan}${dirname}${reset}"
 if [ -n "$git_branch" ]; then
   line1+=" ${green}(${git_branch}${reset}${git_status_markers}${green})${reset}"
 fi
