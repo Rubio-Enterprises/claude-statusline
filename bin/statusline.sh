@@ -15,15 +15,16 @@ fi
 # falls back to bright yellow (slot 11), which renders as orange-ish in
 # most palettes.
 blue='\033[34m'
+bblue='\033[94m'
 orange='\033[93m'
 green='\033[32m'
 cyan='\033[36m'
 red='\033[31m'
 bred='\033[91m' # bright red (slot 9) — top effort tier
 yellow='\033[33m'
-white='\033[37m'
 magenta='\033[35m'
 dim='\033[2m'
+default_fg='\033[39m'
 reset='\033[m'
 
 # Keep separator escape-free: Claude Code's statusline renderer truncates
@@ -46,21 +47,23 @@ format_tokens() {
 
 color_for_pct() {
   local pct=$1
-  if [ "$pct" -ge 90 ]; then
+  if [ "$pct" -ge 95 ]; then
     printf '%b' "$red"
+  elif [ "$pct" -ge 85 ]; then
+    printf '%b' "$orange"
   elif [ "$pct" -ge 70 ]; then
     printf '%b' "$yellow"
   elif [ "$pct" -ge 50 ]; then
-    printf '%b' "$orange"
+    printf '%b' "$cyan"
   else
-    printf '%b' "$green"
+    printf '%b' "${dim}${default_fg}"
   fi
 }
 
 # Color the model segment by family, classified from the already-normalized
 # model_name (sourced live from Claude Code's own .model.display_name). Substring
 # match also covers legacy claude-3-* ids; the "Claude" default and any
-# non-Anthropic model fall through to white as an "unrecognized" signal.
+# non-Anthropic model fall through to the terminal's default foreground.
 # fable is the top-of-the-line flagship → bright red (slot 9) so it stands out
 # above opus's magenta; cases are ordered by tier, highest first.
 color_for_model() {
@@ -69,7 +72,7 @@ color_for_model() {
   *opus*) printf '%b' "$magenta" ;;
   *sonnet*) printf '%b' "$blue" ;;
   *haiku*) printf '%b' "$cyan" ;;
-  *) printf '%b' "$white" ;;
+  *) printf '%b' "$default_fg" ;;
   esac
 }
 
@@ -260,33 +263,33 @@ fi
 skip_perms=""
 parent_cmd=$(ps -o args= -p "$PPID" 2>/dev/null)
 if [[ "$parent_cmd" == *"--dangerously-skip-permissions"* ]]; then
-  skip_perms="⚡  "
+  skip_perms="${orange}⚡${reset}  "
 fi
 
 model_color=$(color_for_model "$model_name")
 context_segment="${pct_color}${pct_used}%${reset}"
 effort_segment=""
 case "$effort" in
-low) effort_segment="${dim}⠄ ${effort}${reset}" ;;
-medium) effort_segment="${yellow}⠆ ${effort}${reset}" ;;
-high) effort_segment="${green}⠦ ${effort}${reset}" ;;
+low) effort_segment="${dim}${default_fg}⠄ ${effort}${reset}" ;;
+medium) effort_segment="${cyan}⠆ ${effort}${reset}" ;;
+high) effort_segment="${blue}⠦ ${effort}${reset}" ;;
 xhigh) effort_segment="${magenta}⠶ ${effort}${reset}" ;;
 max) effort_segment="${bred}⠿ ${effort}${reset}" ;;
-ultracode) effort_segment="${blue}◆ ${effort}${reset}" ;;
+ultracode) effort_segment="${bblue}◆ ${effort}${reset}" ;;
 auto) effort_segment="${cyan}◎ ${effort}${reset}" ;;
-*) effort_segment="${dim}⠆ ${effort}${reset}" ;;
+*) effort_segment="${dim}${default_fg}⠆ ${effort}${reset}" ;;
 esac
 
 line1="${model_color}${model_name}${reset}"
 if [ -n "$git_branch" ]; then
   if [ -n "$git_status_markers" ]; then
     git_status_markers=${git_status_markers# }
-    line1+="${sep}${green}(${reset}${git_status_markers}${green}) ${git_branch}${reset}"
+    line1+="${sep}${blue}(${reset}${git_status_markers}${blue}) ${git_branch}${reset}"
   else
-    line1+="${sep}${green}${git_branch}${reset}"
+    line1+="${sep}${blue}${git_branch}${reset}"
   fi
 fi
-line1+="${sep}${skip_perms}${cyan}${display_cwd}${reset}"
+line1+="${sep}${skip_perms}${dim}${default_fg}${display_cwd}${reset}"
 
 # ── OAuth token resolution ──────────────────────────────
 get_oauth_token() {
@@ -497,7 +500,7 @@ if [ -n "$five_pct" ]; then
   five_reset_fmt=$(format_reset_time "$five_reset" "time")
   five_bar=$(build_bar "$five_n" "$bar_width")
   five_color=$(color_for_pct "$five_n")
-  rate_lines+="${white}cur.${reset} ${five_bar} ${five_color}${five_n}%${reset} ${white}${five_reset_fmt}${reset}"
+  rate_lines+="${cyan}cur.${reset} ${five_bar} ${five_color}${five_n}%${reset} ${dim}${default_fg}${five_reset_fmt}${reset}"
 fi
 
 if [ -n "$seven_pct" ]; then
@@ -506,7 +509,7 @@ if [ -n "$seven_pct" ]; then
   seven_bar=$(build_bar "$seven_n" "$bar_width")
   seven_color=$(color_for_pct "$seven_n")
   [ -n "$rate_lines" ] && rate_lines+="${sep}"
-  rate_lines+="${white}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${white}${seven_reset_fmt}${reset}"
+  rate_lines+="${magenta}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${dim}${default_fg}${seven_reset_fmt}${reset}"
 fi
 
 # ── Output ──────────────────────────────────────────────
