@@ -1,0 +1,58 @@
+name: standards
+# `on:` is quoted to satisfy `yaml[truthy]` (yamllint + ansible-lint): without
+# quotes, YAML 1.1 parsers fold `on` into the boolean `On`. GitHub Actions
+# resolves the key by name regardless, and actionlint accepts both forms.
+#
+# The PR gates (audit, lint/format, secret-scan/gitleaks, pr-title, typecheck,
+# python/rust tests) are NO LONGER rendered here — they are Required Governance
+# Workflows injected by org rulesets from `Rubio-Enterprises/.github`, resolved
+# at the repo's channel (`stable`, or `canary` for the canary ring). The
+# copier-sync/copier-check jobs are gone too — the rendered residue now
+# propagates as auto-merged Renovate copier PRs. What remains here is the
+# irreducibly consumer-local surface: the scheduled tree-wide trufflehog scan,
+# the lefthook CI run (lint-hooks — the only CI enforcement for linters with no
+# config-path flag: golangci-lint, pyright, shellcheck, swiftformat, deno …;
+# its 4-linter overlap with the injected gate-lint-format is a known, accepted
+# cost), and (when the archetype has an e2e contract) the Playwright e2e job.
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened]
+  schedule:
+    # `0 9 * * 1` → weekly trufflehog (secret-scan tree-wide entropy scan).
+    - cron: "0 9 * * 1"
+  # Manual trigger for incident-response re-runs of trufflehog.
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  # Supersede an in-flight run of THIS workflow when a newer commit lands on the
+  # same PR, so stale CI stops burning runner minutes. `github.workflow`
+  # namespaces the group to standards.yml, so it never cancels the repo's other
+  # workflows. cancel-in-progress is gated to pull_request so it NEVER cancels a
+  # push-to-default-branch, tag, or schedule run.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  trufflehog:
+    # schedule = weekly automated; workflow_dispatch = manual re-trigger for
+    # incident response. Scope to trufflehog's OWN weekly cron so no other
+    # schedule event fires a redundant run.
+    if: >-
+      github.event_name == 'schedule' && github.event.schedule == '0 9 * * 1'
+      || github.event_name == 'workflow_dispatch'
+    uses: Rubio-Enterprises/.github/.github/workflows/secret-scan.yml@229cfa978b51687ba4e00c464f77ae24ec65d8b4 # v2
+    with: { mode: trufflehog }
+
+  lint-hooks:
+    # CI gate that runs lefthook commands across the full repo (not just staged
+    # diffs). Catches drift in hook-tool pins / PATH wiring that local commits
+    # would otherwise hit first. PR-only; push/schedule paths skip.
+    if: github.event_name == 'pull_request' && github.event.action != 'edited'
+    uses: Rubio-Enterprises/.github/.github/workflows/lint-hooks.yml@229cfa978b51687ba4e00c464f77ae24ec65d8b4 # v2
+    # secrets: inherit — the reusable workflow's private-Go-module mint step
+    # (consumers setting GO_PRIVATE_MODULE_REPOS) reads the org secrets
+    # STANDARDS_READER_APP_ID / STANDARDS_READER_APP_PRIVATE_KEY; a called
+    # workflow receives no caller secrets unless inherited (surfaced by
+    # gha-outrunner, the first GO_PRIVATE_MODULE_REPOS consumer, on .github
+    # release 90eb7c68).
+    secrets: inherit
