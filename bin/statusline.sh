@@ -510,7 +510,7 @@ if [ -n "$seven_pct" ]; then
 fi
 
 # ── Output ──────────────────────────────────────────────
-line2="${context_segment}${sep}${effort_segment}"
+line2="${effort_segment}${sep}${context_segment}"
 [ -n "$rate_lines" ] && line2+="${sep}${rate_lines}"
 printf "%b\n%b" "$line1" "$line2"
 
