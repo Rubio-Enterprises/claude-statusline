@@ -202,11 +202,17 @@ if [ -f "$settings_path" ]; then
   effort=$(jq -r '.effortLevel // "default"' "$settings_path" 2>/dev/null)
 fi
 
-# ── LINE 1: Model │ Context % │ Directory (branch) │ Session │ Effort ──
+# ── Display identity: model │ Git state │ working directory ──
 pct_color=$(color_for_pct "$pct_used")
 cwd=$(echo "$input" | jq -r '.cwd // ""')
 [ -z "$cwd" ] || [ "$cwd" = "null" ] && cwd=$(pwd)
-dirname=$(basename "$cwd")
+if [ "$cwd" = "$HOME" ]; then
+  display_cwd="~"
+elif [[ "$cwd" == "$HOME/"* ]]; then
+  display_cwd="~${cwd#"$HOME"}"
+else
+  display_cwd="$cwd"
+fi
 
 git_branch=""
 git_status_markers=""
@@ -217,7 +223,7 @@ if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   [ -z "$git_branch" ] && git_branch=$(git -C "$cwd" rev-parse --short HEAD 2>/dev/null)
 
   # Ahead/behind vs upstream (output: "<behind>\t<ahead>"); listed first so
-  # the cluster reads (branch ↑N ↓N +S ~M ?U !C). Empty when no upstream.
+  # the cluster reads (↑N ↓N +S ~M ?U !C) branch. Empty when no upstream.
   ab=$(git -C "$cwd" rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)
   if [ -n "$ab" ]; then
     read -r behind ahead <<<"$ab"
@@ -251,23 +257,6 @@ if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 fi
 
-session_duration=""
-session_start=$(echo "$input" | jq -r '.session.start_time // empty')
-if [ -n "$session_start" ] && [ "$session_start" != "null" ]; then
-  start_epoch=$(to_epoch "$session_start")
-  if [ -n "$start_epoch" ]; then
-    now_epoch=$(date +%s)
-    elapsed=$((now_epoch - start_epoch))
-    if [ "$elapsed" -ge 3600 ]; then
-      session_duration="$((elapsed / 3600))h$(((elapsed % 3600) / 60))m"
-    elif [ "$elapsed" -ge 60 ]; then
-      session_duration="$((elapsed / 60))m"
-    else
-      session_duration="${elapsed}s"
-    fi
-  fi
-fi
-
 skip_perms=""
 parent_cmd=$(ps -o args= -p "$PPID" 2>/dev/null)
 if [[ "$parent_cmd" == *"--dangerously-skip-permissions"* ]]; then
@@ -275,29 +264,29 @@ if [[ "$parent_cmd" == *"--dangerously-skip-permissions"* ]]; then
 fi
 
 model_color=$(color_for_model "$model_name")
-line1="${model_color}${model_name}${reset}"
-line1+="${sep}"
-line1+="${pct_color}${pct_used}%${reset}"
-line1+="${sep}"
+context_segment="${pct_color}${pct_used}%${reset}"
+effort_segment=""
 case "$effort" in
-low) line1+="${dim}⠄ ${effort}${reset}" ;;
-medium) line1+="${yellow}⠆ ${effort}${reset}" ;;
-high) line1+="${green}⠦ ${effort}${reset}" ;;
-xhigh) line1+="${magenta}⠶ ${effort}${reset}" ;;
-max) line1+="${bred}⠿ ${effort}${reset}" ;;
-ultracode) line1+="${blue}◆ ${effort}${reset}" ;;
-auto) line1+="${cyan}◎ ${effort}${reset}" ;;
-*) line1+="${dim}⠆ ${effort}${reset}" ;;
+low) effort_segment="${dim}⠄ ${effort}${reset}" ;;
+medium) effort_segment="${yellow}⠆ ${effort}${reset}" ;;
+high) effort_segment="${green}⠦ ${effort}${reset}" ;;
+xhigh) effort_segment="${magenta}⠶ ${effort}${reset}" ;;
+max) effort_segment="${bred}⠿ ${effort}${reset}" ;;
+ultracode) effort_segment="${blue}◆ ${effort}${reset}" ;;
+auto) effort_segment="${cyan}◎ ${effort}${reset}" ;;
+*) effort_segment="${dim}⠆ ${effort}${reset}" ;;
 esac
-line1+="${sep}"
-line1+="${skip_perms}${cyan}${dirname}${reset}"
+
+line1="${model_color}${model_name}${reset}"
 if [ -n "$git_branch" ]; then
-  line1+=" ${green}(${git_branch}${reset}${git_status_markers}${green})${reset}"
+  if [ -n "$git_status_markers" ]; then
+    git_status_markers=${git_status_markers# }
+    line1+="${sep}${green}(${reset}${git_status_markers}${green}) ${git_branch}${reset}"
+  else
+    line1+="${sep}${green}${git_branch}${reset}"
+  fi
 fi
-if [ -n "$session_duration" ]; then
-  line1+="${sep}"
-  line1+="${dim}⏱ ${reset}${white}${session_duration}${reset}"
-fi
+line1+="${sep}${skip_perms}${cyan}${display_cwd}${reset}"
 
 # ── OAuth token resolution ──────────────────────────────
 get_oauth_token() {
@@ -521,7 +510,8 @@ if [ -n "$seven_pct" ]; then
 fi
 
 # ── Output ──────────────────────────────────────────────
-printf "%b" "$line1"
-[ -n "$rate_lines" ] && printf "\n\n%b" "$rate_lines"
+line2="${context_segment}${sep}${effort_segment}"
+[ -n "$rate_lines" ] && line2+="${sep}${rate_lines}"
+printf "%b\n%b" "$line1" "$line2"
 
 exit 0
