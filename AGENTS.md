@@ -2,6 +2,20 @@
 
 This repo follows Rubio-Enterprises standards. Run `/audit-standards` from a Claude Code session to check conformance, or `/onboard-repo` for greenfield setup.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `Rubio-Enterprises/claude-statusline`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default canonical triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use the single-context layout: root `CONTEXT.md` plus repository-wide ADRs in `docs/adr/`. See `docs/agents/domain.md`.
+
 ## What this is
 
 `claude-statusline` configures the Claude Code CLI statusline to show the model, context-window usage, 5h/7d rate limits, working directory, and git branch. It is a **fork of [kamranahmedse/claude-statusline](https://github.com/kamranahmedse/claude-statusline)** maintained under Rubio-Enterprises.
