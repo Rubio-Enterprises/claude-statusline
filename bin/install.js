@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
 
 const CLAUDE_DIR = path.join(os.homedir(), ".claude");
 const SETTINGS_FILE = path.join(CLAUDE_DIR, "settings.json");
@@ -33,7 +33,7 @@ function fail(msg) {
 }
 
 function checkDeps() {
-  const { execSync } = require("child_process");
+  const { execSync } = require("node:child_process");
   const missing = [];
 
   try {
