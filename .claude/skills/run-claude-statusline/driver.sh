@@ -49,7 +49,7 @@ cat >"$STATUSLINE_CACHE_DIR/statusline-usage-cache.json" <<EOF
 {"five_hour":{"utilization":12,"resets_at":$far},"seven_day":{"utilization":40,"resets_at":$far}}
 EOF
 
-echo "[1] statusline.sh — two-line layout (model · Git · cwd / context · effort · rates)"
+echo "[1] statusline.sh — two-line layout (model · Git · cwd / effort · context · rates)"
 payload=$(
   cat <<EOF
 {"model":{"display_name":"Opus 4.8 (1M context)"},
@@ -71,8 +71,9 @@ first_line=${plain%%$'\n'*}
 second_line=${plain#*$'\n'}
 has "cwd is trailing and home-abbreviated" "$first_line" "~${ROOT#"$HOME"}"
 case "$second_line" in
-"15% │ "*) ok "context usage starts the second line" ;;
-*) no "context usage starts the second line — got '$second_line'" ;;
+"15% │ "*) no "effort precedes context on the second line — got '$second_line'" ;;
+*" │ 15% │ "*) ok "effort precedes context on the second line" ;;
+*) no "effort precedes context on the second line — got '$second_line'" ;;
 esac
 case "$plain" in
 *"⏱ "*) no "session duration is omitted" ;;
