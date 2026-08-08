@@ -18,7 +18,7 @@ Use the single-context layout: root `CONTEXT.md` plus repository-wide ADRs in `d
 
 ## What this is
 
-`claude-statusline` configures the Claude Code CLI statusline to show the model, context-window usage, 5h/7d rate limits, working directory, and git branch. It is a **fork of [kamranahmedse/claude-statusline](https://github.com/kamranahmedse/claude-statusline)** maintained under Rubio-Enterprises.
+`claude-statusline` configures the Claude Code CLI statusline to show the model, context-window usage, rate limits, working directory, and git branch. Claude 5h/7d limits remain the default; `STATUSLINE_RATE_LIMIT_PROVIDER=codex` selects weekly Codex/Codex Spark limits from the active Codex CLI account. It is a **fork of [kamranahmedse/claude-statusline](https://github.com/kamranahmedse/claude-statusline)** maintained under Rubio-Enterprises.
 
 Two source files do the work:
 
@@ -35,11 +35,12 @@ Two source files do the work:
 - **The package name stays `@kamranahmedse/claude-statusline`.** Upstream owns
   `package.json` (`bin -> ./bin/install.js`). Copier's fork `_skip_if_exists`
   preserves it on render — do NOT rescope the package.
-- The only additive entries Rubio standards require in `package.json` are the
-  audit-floor `scripts.lint` (`biome check .`), a no-op `scripts.test`, and the
-  `@biomejs/biome` devDep so `npx biome` resolves deterministically. These let
-  `check.sh` (NPM-LINT-SCRIPT-PRESENT + the §6.1 Rego "lint invokes biome"
-  rule) and the lefthook biome hook pass without touching the package identity.
+- The additive Rubio-owned entries in `package.json` are the audit-floor
+  `scripts.lint` (`biome check .`), `scripts.test` (the hermetic renderer and
+  installer integration driver), and the `@biomejs/biome` devDep. These let
+  `check.sh` and the lefthook biome hook pass without touching the package
+  identity; `.github/workflows/test-gate.yml` runs the same non-empty suite in
+  CI.
 - This is an **npm** repo (a `package-lock.json` is committed). Run
   `npm install` after cloning so lefthook + biome resolve.
 

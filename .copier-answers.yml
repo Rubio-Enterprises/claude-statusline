@@ -8,9 +8,8 @@ enforce_audit: true
 enforce_e2e: false
 enforce_lint_format: true
 enforce_lint_hooks: true
-enforce_tests: false
-enforce_tests_reason: Extended fork whose JavaScript surface is upstream-owned, with
-    no repo-local canonical test suite
+enforce_tests: true
+enforce_tests_reason: ''
 enforce_typecheck: true
 enforcement_tier: experimental
 has_ansible: false

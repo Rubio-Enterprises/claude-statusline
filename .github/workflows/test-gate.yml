@@ -1,0 +1,57 @@
+name: test-gate
+# Repository-local Test Gate — the fixed contract from standards ADR-0020.
+# The hermetic integration driver exercises the Bash renderer and installer;
+# it performs no network calls and uses fake Claude/Codex provider commands.
+"on":
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  canonical-tests:
+    name: canonical tests
+    runs-on: ${{ fromJSON(vars.RUNNER_GLUE || '["ubuntu-latest"]') }}
+    outputs:
+      tests_ran: ${{ steps.test.outputs.tests_ran }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22.12.0
+
+      - id: test
+        name: Run canonical non-E2E tests
+        env:
+          RUBIO_TEST_GATE_COUNT_OUTPUT: ${{ runner.temp }}/test-gate-count
+        run: |
+          set -euo pipefail
+          rm -f "$RUBIO_TEST_GATE_COUNT_OUTPUT"
+          npm test
+          test -s "$RUBIO_TEST_GATE_COUNT_OUTPUT"
+          test "$(cat "$RUBIO_TEST_GATE_COUNT_OUTPUT")" -gt 0
+          echo "tests_ran=true" >> "$GITHUB_OUTPUT"
+
+  aggregate:
+    # `name:` is load-bearing — `test-gate` is the status context.
+    name: test-gate
+    if: ${{ always() }}
+    needs: [canonical-tests]
+    runs-on: ${{ fromJSON(vars.RUNNER_GLUE || '["ubuntu-latest"]') }}
+    env:
+      NEEDS_JSON: ${{ toJSON(needs) }}
+    steps:
+      - name: Require successful non-empty test execution
+        run: >-
+          jq -e 'length > 0 and all(.[]; .result == "success" and
+          .outputs.tests_ran == "true")' <<<"$NEEDS_JSON"
