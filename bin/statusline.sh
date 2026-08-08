@@ -310,7 +310,7 @@ if [ -n "$git_branch" ]; then
 fi
 line1+="${sep}${skip_perms}${dim}${default_fg}${display_cwd}${reset}"
 
-# ── OAuth token resolution ──────────────────────────────
+# ── OAuth token resolution (Claude provider only) ──────
 get_oauth_token() {
   local token=""
 
@@ -356,31 +356,210 @@ get_oauth_token() {
 }
 
 # ════════════════════════════════════════════════════════
-#  DATA SOURCING LAYER
+#  RATE-LIMIT DATA SOURCING
 #
-#  5h / 7d  : stdin-first. Claude Code v2.1.80+ ships rate-limit data in the
-#             stdin JSON (.rate_limits.{five_hour,seven_day}.{used_percentage,
-#             resets_at}); resets_at is Unix epoch seconds. Zero network, no
-#             cache, immune to 429. Falls back to the API cache when stdin
-#             lacks rate_limits (first render of a session, or CC < 2.1.80).
-#  refresh  : single-flight via an mkdir lock, so with N concurrent sessions
-#             exactly ONE invocation performs the curl per api_ttl window; the
-#             rest serve cache/stdin instantly (stale-while-revalidate). The
-#             hot path NEVER blocks on the network.
+#  claude : stdin-first 5h/7d data, then the existing Anthropic usage API
+#           cache fallback. TTL: 15 minutes.
+#  codex  : app-server account/rateLimits/read only. Claude stdin rate_limits
+#           are deliberately ignored. TTL: 5 minutes.
+#  other  : no rate-limit data and no provider fetch.
+#
+#  Both providers use isolated cache/lock paths and the same host-wide mkdir
+#  single-flight plus stale-while-revalidate behavior. All refresh work is
+#  detached from the statusline hot path.
 # ════════════════════════════════════════════════════════
 
-# ── Configurable paths / knobs (env-overridable for tuning) ──
+rate_limit_provider="${STATUSLINE_RATE_LIMIT_PROVIDER:-claude}"
 cache_dir="${STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline}"
-cache_file="${cache_dir}/statusline-usage-cache.json"
-lock_dir="${cache_dir}/statusline-refresh.lock"
-api_ttl="${STATUSLINE_API_TTL:-900}"        # 15 min — 5h/7d cache-fallback TTL
-lock_maxage="${STATUSLINE_LOCK_MAXAGE:-30}" # reclaim a lock held longer than this
+lock_maxage="${STATUSLINE_LOCK_MAXAGE:-30}"
+max_stale_age="${STATUSLINE_MAX_STALE_AGE:-3600}"
 ua_version="${STATUSLINE_UA_VERSION:-2.1.156}"
-mkdir -p "$cache_dir"
+cache_file=""
+lock_dir=""
+provider_ttl=""
+auth_state_file=""
+auth_attempt_file=""
+auth_lock_dir=""
+failure_file=""
+codex_auth_probe_ttl="${STATUSLINE_CODEX_AUTH_PROBE_TTL:-5}"
+codex_failure_ttl="${STATUSLINE_CODEX_FAILURE_TTL:-30}"
+
+case "$rate_limit_provider" in
+claude)
+  # Keep the historical Claude paths for backward-compatible cache reuse.
+  cache_file="${cache_dir}/statusline-usage-cache.json"
+  lock_dir="${cache_dir}/statusline-refresh.lock"
+  provider_ttl="${STATUSLINE_CLAUDE_TTL:-${STATUSLINE_API_TTL:-900}}"
+  ;;
+codex)
+  cache_file="${cache_dir}/statusline-codex-usage-cache.json"
+  lock_dir="${cache_dir}/statusline-codex-refresh.lock"
+  auth_state_file="${cache_dir}/statusline-codex-auth-metadata"
+  auth_attempt_file="${cache_dir}/statusline-codex-auth-attempt"
+  auth_lock_dir="${cache_dir}/statusline-codex-auth-refresh.lock"
+  failure_file="${cache_dir}/statusline-codex-refresh-failed"
+  provider_ttl="${STATUSLINE_CODEX_TTL:-300}"
+  ;;
+esac
 
 # mtime in epoch seconds, portable (GNU stat -c, then BSD stat -f).
 file_mtime() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+stop_process_bounded() {
+  local pid="$1" stop_tick
+  kill "$pid" 2>/dev/null
+  for ((stop_tick = 0; stop_tick < 5; stop_tick++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null
+  fi
+  wait "$pid" 2>/dev/null
+}
+
+bounded_security_metadata() {
+  local keychain_account="$1" output pid poll_tick exit_code metadata
+  output="${cache_dir}/codex-security.$$.${RANDOM}"
+  security find-generic-password -s "Codex Auth" -a "$keychain_account" >"$output" 2>/dev/null &
+  pid=$!
+  for ((poll_tick = 0; poll_tick < 20; poll_tick++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      exit_code=$?
+      metadata=$(cat "$output" 2>/dev/null)
+      rm -f "$output"
+      [ "$exit_code" -eq 0 ] && printf '%s' "$metadata"
+      return "$exit_code"
+    fi
+    sleep 0.05
+  done
+  stop_process_bounded "$pid"
+  rm -f "$output"
+  return 1
+}
+
+# Codex auth metadata is enough to notice an active-account change without
+# opening auth.json or exposing any credential value. File-backed auth uses
+# stat metadata. On macOS, keyring-backed auth hashes only the item's public
+# attributes (security omits the secret unless explicitly asked for -w/-g).
+codex_direct_auth_metadata() {
+  local codex_home="${CODEX_HOME:-$HOME/.codex}"
+  local auth_file="${codex_home}/auth.json"
+  if [ -f "$auth_file" ]; then
+    printf 'file:'
+    stat -c '%Y:%s:%i' "$auth_file" 2>/dev/null || stat -f '%m:%z:%i' "$auth_file" 2>/dev/null
+    return
+  fi
+
+  local canonical_home digest keychain_account keychain_metadata metadata_hash
+  if command -v security >/dev/null 2>&1 && command -v shasum >/dev/null 2>&1; then
+    canonical_home=$(cd "$codex_home" 2>/dev/null && pwd -P) || canonical_home="$codex_home"
+    digest=$(printf '%s' "$canonical_home" | shasum -a 256 | awk '{print $1}')
+    if [ -n "$digest" ]; then
+      keychain_account="cli|${digest:0:16}"
+      if keychain_metadata=$(bounded_security_metadata "$keychain_account"); then
+        metadata_hash=$(printf '%s' "$keychain_metadata" | shasum -a 256 | awk '{print $1}')
+        [ -n "$metadata_hash" ] && printf 'keychain:%s' "$metadata_hash"
+        return
+      fi
+    fi
+  fi
+}
+
+# Other keyring backends expose no safe account-specific public metadata. Probe
+# their non-secret login state asynchronously and bound the CLI in case keyring
+# access stalls. This detects login/logout without putting Codex on the render
+# hot path; direct account-to-account switches converge on the normal cache TTL.
+codex_login_status_metadata() {
+  command -v codex >/dev/null 2>&1 || return 1
+  local output pid i login_rc login_status
+  output="${auth_state_file}.probe.$$.${RANDOM}"
+  codex login status >"$output" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 20; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      login_rc=$?
+      login_status=$(cat "$output" 2>/dev/null)
+      rm -f "$output"
+      printf 'status:%s:' "$login_rc"
+      printf '%s' "$login_status" | cksum | awk '{printf "%s:%s", $1, $2}'
+      return 0
+    fi
+    sleep 0.05
+  done
+  stop_process_bounded "$pid"
+  rm -f "$output"
+  return 1
+}
+
+write_codex_auth_state_atomic() {
+  local metadata="$1" tmp
+  tmp="${auth_state_file}.tmp.$$.${RANDOM}"
+  printf '%s' "$metadata" >"$tmp" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+  mv -f "$tmp" "$auth_state_file" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+}
+
+write_codex_failure_marker() {
+  local metadata tmp
+  metadata=$(codex_auth_metadata)
+  tmp="${failure_file}.tmp.$$.${RANDOM}"
+  printf '%s' "$metadata" >"$tmp" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+  mv -f "$tmp" "$failure_file" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+}
+
+refresh_codex_auth_state() {
+  local now lmtime lock_age metadata
+  if ! mkdir "$auth_lock_dir" 2>/dev/null; then
+    now=$(date +%s)
+    lmtime=$(file_mtime "$auth_lock_dir")
+    [ -z "$lmtime" ] && lmtime=$now
+    lock_age=$((now - lmtime))
+    [ "$lock_age" -lt "$lock_maxage" ] && return 1
+    rmdir "$auth_lock_dir" 2>/dev/null || return 1
+    mkdir "$auth_lock_dir" 2>/dev/null || return 1
+  fi
+  metadata=$(codex_login_status_metadata)
+  [ -n "$metadata" ] && write_codex_auth_state_atomic "$metadata"
+  rmdir "$auth_lock_dir" 2>/dev/null
+}
+
+trigger_codex_auth_probe() {
+  local attempt_mtime attempt_age
+  [ "$rate_limit_provider" = "codex" ] || return 0
+  [ -n "$(codex_direct_auth_metadata)" ] && return 0
+  if [ -f "$auth_attempt_file" ]; then
+    attempt_mtime=$(file_mtime "$auth_attempt_file")
+    [ -n "$attempt_mtime" ] && attempt_age=$(($(date +%s) - attempt_mtime))
+    [ -n "${attempt_age:-}" ] && [ "$attempt_age" -lt "$codex_auth_probe_ttl" ] && return 0
+  fi
+  : >"$auth_attempt_file" 2>/dev/null
+  (refresh_codex_auth_state >/dev/null 2>&1 &) >/dev/null 2>&1
+}
+
+codex_auth_metadata() {
+  local metadata
+  metadata=$(codex_direct_auth_metadata)
+  if [ -n "$metadata" ]; then
+    printf '%s' "$metadata"
+  elif [ -f "$auth_state_file" ]; then
+    cat "$auth_state_file" 2>/dev/null
+  fi
 }
 
 # Atomic cache write: temp-then-mv in the SAME dir (same filesystem → atomic
@@ -399,8 +578,7 @@ write_cache_atomic() {
   return 0
 }
 
-# Fetch the raw oauth/usage JSON on stdout. Returns non-zero without a token.
-do_fetch() {
+fetch_claude() {
   local token
   token=$(get_oauth_token)
   [ -z "$token" ] || [ "$token" = "null" ] && return 1
@@ -413,122 +591,323 @@ do_fetch() {
     "https://api.anthropic.com/api/oauth/usage" 2>/dev/null
 }
 
+# Run one Codex app-server instance, complete the JSONL initialize handshake,
+# request the active account's rate limits, and stop after a caller-side
+# deadline. Keeping stdin open until response id=2 arrives avoids app-server
+# exiting before its asynchronous account request completes.
+fetch_codex() {
+  command -v codex >/dev/null 2>&1 || return 1
+
+  local timeout_seconds="${STATUSLINE_CODEX_TIMEOUT:-5}"
+  local scratch fifo output server_pid deadline stop_tick initialized=false response=""
+  scratch="${cache_dir}/codex-fetch.$$.${RANDOM}"
+  fifo="${scratch}.in"
+  output="${scratch}.out"
+  mkfifo "$fifo" 2>/dev/null || return 1
+  : >"$output" || {
+    rm -f "$fifo"
+    return 1
+  }
+
+  codex app-server --stdio <"$fifo" >"$output" 2>/dev/null &
+  server_pid=$!
+  exec 3>"$fifo"
+  printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"claude-statusline","version":"1"},"capabilities":{"experimentalApi":true}}}' >&3
+
+  deadline=$(($(date +%s) + timeout_seconds))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    if ! $initialized && jq -s -e 'any(.[]; .id == 1 and .result != null)' "$output" >/dev/null 2>&1; then
+      printf '%s\n' '{"method":"initialized"}' '{"id":2,"method":"account/rateLimits/read","params":null}' >&3
+      initialized=true
+    fi
+    if $initialized && jq -s -e 'any(.[]; .id == 2 and .result != null)' "$output" >/dev/null 2>&1; then
+      response=$(jq -s -c 'map(select(.id == 2 and .result != null)) | last.result' "$output" 2>/dev/null)
+      break
+    fi
+    if $initialized && jq -s -e 'any(.[]; .id == 2 and .error != null)' "$output" >/dev/null 2>&1; then
+      break
+    fi
+    kill -0 "$server_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+
+  exec 3>&-
+  # EOF is the normal shutdown signal. Give app-server the remainder of the
+  # caller-side deadline to exit cleanly; kill only a process that outlives it.
+  while kill -0 "$server_pid" 2>/dev/null && [ "$(date +%s)" -le "$deadline" ]; do
+    sleep 0.05
+  done
+  if kill -0 "$server_pid" 2>/dev/null; then
+    kill "$server_pid" 2>/dev/null
+    for ((stop_tick = 0; stop_tick < 5; stop_tick++)); do
+      kill -0 "$server_pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    if kill -0 "$server_pid" 2>/dev/null; then
+      kill -KILL "$server_pid" 2>/dev/null
+    fi
+  fi
+  wait "$server_pid" 2>/dev/null
+  rm -f "$fifo" "$output"
+
+  [ -n "$response" ] && printf '%s' "$response"
+}
+
+fetch_provider() {
+  case "$rate_limit_provider" in
+  claude) fetch_claude ;;
+  codex) fetch_codex ;;
+  *) return 1 ;;
+  esac
+}
+
 # Single-flight: acquire an atomic mkdir lock, fetch, write cache, release.
+# The unique owner marker makes cleanup race-safe: an old process can remove
+# only its own marker, and rmdir refuses to delete a replacement owner's lock.
 # Returns 0 if THIS process did the refresh; 1 if another holds a live lock.
 refresh_singleflight() {
+  local lock_token owner_marker stale_marker="" now lmtime lock_age
+  local -a stale_markers
+  lock_token="${BASHPID:-$$}-${RANDOM}"
+  owner_marker="${lock_dir}/owner-${lock_token}"
+
   if ! mkdir "$lock_dir" 2>/dev/null; then
-    # Lock exists. A lock the winner JUST created may not have its PID
-    # written yet — so a GRACE window treats a young lock as live
-    # regardless of PID (without it, N losers would all tear down the
-    # winner's fresh lock and each fetch — a PID-file TOCTOU). Past grace
-    # we consult PID liveness; lock_maxage is the final backstop for a
-    # hung / PID-less / PID-reused holder.
-    local now lmtime lock_age grace owner_pid reclaim=0
     now=$(date +%s)
     lmtime=$(file_mtime "$lock_dir")
     [ -z "$lmtime" ] && lmtime=$now
     lock_age=$((now - lmtime))
-    grace=3
-    [ "$grace" -gt "$lock_maxage" ] && grace="$lock_maxage"
+    [ "$lock_age" -lt "$lock_maxage" ] && return 1
 
-    [ "$lock_age" -lt "$grace" ] && return 1 # young lock → live winner
+    set +f
+    stale_markers=("$lock_dir"/owner-*)
+    set -f
+    for stale_marker in "${stale_markers[@]}"; do
+      [ -e "$stale_marker" ] || stale_marker=""
+      break
+    done
+    [ -n "$stale_marker" ] && rm -f "$stale_marker" 2>/dev/null
+    rmdir "$lock_dir" 2>/dev/null || return 1
+    mkdir "$lock_dir" 2>/dev/null || return 1
+  fi
 
-    owner_pid=$(cat "${lock_dir}/pid" 2>/dev/null)
-    if [ -n "$owner_pid" ] && [[ "$owner_pid" =~ ^[0-9]+$ ]]; then
-      kill -0 "$owner_pid" 2>/dev/null || reclaim=1
+  : >"$owner_marker" 2>/dev/null || {
+    rmdir "$lock_dir" 2>/dev/null
+    return 1
+  }
+
+  local resp cache_payload auth_metadata auth_before="" auth_after=""
+  local refresh_succeeded=false auth_changed_during_fetch=false
+  if [ "$rate_limit_provider" = "codex" ]; then
+    auth_before=$(codex_direct_auth_metadata)
+    [ -z "$auth_before" ] && auth_before=$(codex_login_status_metadata)
+  fi
+  resp=$(fetch_provider)
+  case "$rate_limit_provider" in
+  claude)
+    if [ -n "$resp" ] && echo "$resp" | jq -e '.five_hour' >/dev/null 2>&1; then
+      write_cache_atomic "$resp"
     fi
-    [ "$lock_age" -ge "$lock_maxage" ] && reclaim=1
-
-    if [ "$reclaim" -eq 1 ]; then
-      rm -rf "$lock_dir" 2>/dev/null
-      mkdir "$lock_dir" 2>/dev/null || return 1 # lost the reclaim race
+    ;;
+  codex)
+    auth_after=$(codex_direct_auth_metadata)
+    if [ -z "$auth_after" ]; then
+      auth_after=$(codex_login_status_metadata)
+      [ -n "$auth_after" ] && write_codex_auth_state_atomic "$auth_after"
+    fi
+    if [ "$auth_before" != "$auth_after" ]; then
+      auth_changed_during_fetch=true
+      resp=""
+    fi
+    if [ -n "$resp" ] && echo "$resp" |
+      jq -e '(.rateLimits != null) or ((.rateLimitsByLimitId // {}) | length > 0)' >/dev/null 2>&1; then
+      auth_metadata="$auth_after"
+      cache_payload=$(jq -cn --arg authMetadata "$auth_metadata" --argjson data "$resp" \
+        '{authMetadata: $authMetadata, data: $data}')
+      write_cache_atomic "$cache_payload" && refresh_succeeded=true
+    fi
+    if $refresh_succeeded || $auth_changed_during_fetch; then
+      rm -f "$failure_file" 2>/dev/null
     else
-      return 1
+      write_codex_failure_marker
     fi
-  fi
-
-  # We hold the lock. Stamp our PID FIRST so racing peers past grace see a
-  # live owner, then fetch and (only on a valid response) atomically cache.
-  printf '%s' "$$" >"${lock_dir}/pid" 2>/dev/null
-  local resp
-  resp=$(do_fetch)
-  if [ -n "$resp" ] && echo "$resp" | jq -e '.five_hour' >/dev/null 2>&1; then
-    write_cache_atomic "$resp"
-  fi
-  rm -rf "$lock_dir" 2>/dev/null
+    ;;
+  esac
+  rm -f "$owner_marker" 2>/dev/null
+  rmdir "$lock_dir" 2>/dev/null
   return 0
 }
 
-# Kick a refresh in the background (detached, output redirected) so the hot
-# path serves stale this render and picks up fresh data next render.
+# Kick a refresh in the background so this render only ever reads stdin/cache.
 trigger_refresh() {
+  local failure_mtime failure_age failure_auth_metadata current_auth_metadata
+  if [ -n "$failure_file" ] && [ -f "$failure_file" ]; then
+    failure_auth_metadata=$(cat "$failure_file" 2>/dev/null)
+    current_auth_metadata=$(codex_auth_metadata)
+    if [ "$failure_auth_metadata" != "$current_auth_metadata" ]; then
+      rm -f "$failure_file" 2>/dev/null
+    else
+      failure_mtime=$(file_mtime "$failure_file")
+      [ -n "$failure_mtime" ] && failure_age=$(($(date +%s) - failure_mtime))
+      [ -n "${failure_age:-}" ] && [ "$failure_age" -lt "$codex_failure_ttl" ] && return 0
+    fi
+  fi
   (refresh_singleflight >/dev/null 2>&1 &) >/dev/null 2>&1
 }
 
-# ── Load whatever cache we have (5h/7d fallback) ──
 cache_data=""
-if [ -f "$cache_file" ]; then
-  cache_data=$(cat "$cache_file" 2>/dev/null)
-  echo "$cache_data" | jq -e . >/dev/null 2>&1 || cache_data=""
+cache_age=""
+cache_is_fresh=false
+cache_auth_valid=true
+now=$(date +%s)
+
+if [ -n "$cache_file" ]; then
+  mkdir -p "$cache_dir"
+  trigger_codex_auth_probe
+  if [ -f "$cache_file" ]; then
+    cmtime=$(file_mtime "$cache_file")
+    [ -n "$cmtime" ] && cache_age=$((now - cmtime))
+    raw_cache=$(cat "$cache_file" 2>/dev/null)
+    if echo "$raw_cache" | jq -e . >/dev/null 2>&1; then
+      if [ "$rate_limit_provider" = "codex" ]; then
+        cached_auth_metadata=$(echo "$raw_cache" | jq -r '.authMetadata // ""')
+        current_auth_metadata=$(codex_auth_metadata)
+        if [ -n "$current_auth_metadata" ]; then
+          [ "$cached_auth_metadata" != "$current_auth_metadata" ] && cache_auth_valid=false
+        else
+          case "$cached_auth_metadata" in
+          file:* | keychain:*) cache_auth_valid=false ;;
+          esac
+        fi
+        $cache_auth_valid && cache_data=$(echo "$raw_cache" | jq -c '.data // empty')
+      else
+        cache_data="$raw_cache"
+      fi
+    fi
+  fi
+
+  if [ -n "$cache_data" ] && [ -n "$cache_age" ] && [ "$cache_age" -lt "$provider_ttl" ] && $cache_auth_valid; then
+    cache_is_fresh=true
+  fi
+  if [ -z "$cache_age" ] || [ "$cache_age" -gt "$max_stale_age" ] || ! $cache_auth_valid; then
+    cache_data=""
+  fi
+
+  if ! $cache_is_fresh; then
+    trigger_refresh
+  fi
 fi
 
-# ── Is the API cache stale? ──
-api_cache_stale=true
-if [ -f "$cache_file" ]; then
-  cmtime=$(file_mtime "$cache_file")
-  now=$(date +%s)
-  [ -n "$cmtime" ] && [ "$((now - cmtime))" -lt "$api_ttl" ] && api_cache_stale=false
-fi
+# Cached windows are displayable only until their own reset epoch. Missing
+# reset metadata preserves the historical Claude fallback behavior.
+cache_window_valid() {
+  local reset_at="$1" reset_epoch
+  [ -z "$reset_at" ] || [ "$reset_at" = "null" ] && return 0
+  reset_epoch=$(to_epoch "$reset_at") || return 1
+  [ "$reset_epoch" -gt "$now" ]
+}
 
-# ── Does stdin carry rate_limits (CC ≥ 2.1.80)? ──
-stdin_has_rl=false
-if echo "$input" | jq -e '.rate_limits.five_hour.used_percentage != null' >/dev/null 2>&1; then
-  stdin_has_rl=true
-fi
-
-# ── Refresh decision: API cache stale, or stdin can't cover 5h/7d and we
-#    have no usable cache. Always non-blocking (single-flighted in the bg). ──
-if $api_cache_stale || { ! $stdin_has_rl && [ -z "$cache_data" ]; }; then
-  trigger_refresh
-fi
-
-# ── Resolve 5h / 7d: stdin-first, then API-cache fallback ──
-five_pct=""
-five_reset=""
-seven_pct=""
-seven_reset=""
-if $stdin_has_rl; then
-  five_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
-  five_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
-  seven_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
-  seven_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
-fi
-if [ -n "$cache_data" ]; then
-  [ -z "$five_pct" ] && five_pct=$(echo "$cache_data" | jq -r '.five_hour.utilization // empty')
-  [ -z "$five_reset" ] && five_reset=$(echo "$cache_data" | jq -r '.five_hour.resets_at // empty')
-  [ -z "$seven_pct" ] && seven_pct=$(echo "$cache_data" | jq -r '.seven_day.utilization // empty')
-  [ -z "$seven_reset" ] && seven_reset=$(echo "$cache_data" | jq -r '.seven_day.resets_at // empty')
-fi
-
-# ── Rate limit lines ────────────────────────────────────
 rate_lines=""
 bar_width=5
 
-if [ -n "$five_pct" ]; then
-  five_n=$(echo "$five_pct" | awk '{printf "%.0f", $1}')
-  five_reset_fmt=$(format_reset_time "$five_reset" "time")
-  five_bar=$(build_bar "$five_n" "$bar_width")
-  five_color=$(color_for_pct "$five_n")
-  rate_lines+="${white}cur.${reset} ${five_bar} ${five_color}${five_n}%${reset} ${white}${five_reset_fmt}${reset}"
-fi
+if [ "$rate_limit_provider" = "claude" ]; then
+  stdin_has_rl=false
+  if echo "$input" | jq -e '.rate_limits.five_hour.used_percentage != null' >/dev/null 2>&1; then
+    stdin_has_rl=true
+  fi
 
-if [ -n "$seven_pct" ]; then
-  seven_n=$(echo "$seven_pct" | awk '{printf "%.0f", $1}')
-  seven_reset_fmt=$(format_reset_time "$seven_reset" "datetime")
-  seven_bar=$(build_bar "$seven_n" "$bar_width")
-  seven_color=$(color_for_pct "$seven_n")
-  [ -n "$rate_lines" ] && rate_lines+="${sep}"
-  rate_lines+="${white}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${white}${seven_reset_fmt}${reset}"
+  five_pct=""
+  five_reset=""
+  seven_pct=""
+  seven_reset=""
+  five_from_cache=false
+  five_reset_from_cache=false
+  seven_from_cache=false
+  seven_reset_from_cache=false
+  if $stdin_has_rl; then
+    five_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
+    five_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
+    seven_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
+    seven_reset=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+  fi
+  if [ -n "$cache_data" ]; then
+    if [ -z "$five_pct" ]; then
+      five_pct=$(echo "$cache_data" | jq -r '.five_hour.utilization // empty')
+      five_from_cache=true
+    fi
+    if [ -z "$five_reset" ]; then
+      five_reset=$(echo "$cache_data" | jq -r '.five_hour.resets_at // empty')
+      five_reset_from_cache=true
+    fi
+    if [ -z "$seven_pct" ]; then
+      seven_pct=$(echo "$cache_data" | jq -r '.seven_day.utilization // empty')
+      seven_from_cache=true
+    fi
+    if [ -z "$seven_reset" ]; then
+      seven_reset=$(echo "$cache_data" | jq -r '.seven_day.resets_at // empty')
+      seven_reset_from_cache=true
+    fi
+  fi
+
+  if $five_reset_from_cache && ! cache_window_valid "$five_reset"; then
+    if $five_from_cache; then five_pct=""; else five_reset=""; fi
+  fi
+  if $seven_reset_from_cache && ! cache_window_valid "$seven_reset"; then
+    if $seven_from_cache; then seven_pct=""; else seven_reset=""; fi
+  fi
+
+  if [ -n "$five_pct" ]; then
+    five_n=$(echo "$five_pct" | awk '{printf "%.0f", $1}')
+    five_reset_fmt=$(format_reset_time "$five_reset" "time")
+    five_bar=$(build_bar "$five_n" "$bar_width")
+    five_color=$(color_for_pct "$five_n")
+    rate_lines+="${white}cur.${reset} ${five_bar} ${five_color}${five_n}%${reset} ${white}${five_reset_fmt}${reset}"
+  fi
+
+  if [ -n "$seven_pct" ]; then
+    seven_n=$(echo "$seven_pct" | awk '{printf "%.0f", $1}')
+    seven_reset_fmt=$(format_reset_time "$seven_reset" "datetime")
+    seven_bar=$(build_bar "$seven_n" "$bar_width")
+    seven_color=$(color_for_pct "$seven_n")
+    [ -n "$rate_lines" ] && rate_lines+="${sep}"
+    rate_lines+="${white}wk.${reset} ${seven_bar} ${seven_color}${seven_n}%${reset} ${white}${seven_reset_fmt}${reset}"
+  fi
+elif [ "$rate_limit_provider" = "codex" ] && [ -n "$cache_data" ]; then
+  codex_rows=$(echo "$cache_data" | jq -r '
+    def buckets:
+      (((.rateLimitsByLimitId // {}) | to_entries | map(.value + {cacheKey: .key})))
+      + (if .rateLimits then [.rateLimits + {cacheKey: (.rateLimits.limitId // "")}] else [] end);
+    def weekly($bucket):
+      ([$bucket.primary, $bucket.secondary]
+       | map(select(. != null and .windowDurationMins == 10080 and .usedPercent != null))
+       | .[0]);
+    buckets as $buckets
+    | (first($buckets[] | select(.cacheKey == "codex" or .limitId == "codex")) // null) as $general
+    | (first($buckets[] | select(
+         ((.limitName // "") | ascii_downcase | contains("spark"))
+         or ((.cacheKey // "") | ascii_downcase | contains("spark"))
+         or ((.limitId // "") | ascii_downcase | contains("spark")))) // null) as $spark
+    | [
+        (weekly($general) as $window
+         | select($window != null)
+         | ["gen.", $window.usedPercent, ($window.resetsAt // "")]),
+        (weekly($spark) as $window
+         | select($window != null)
+         | ["spark.", $window.usedPercent, ($window.resetsAt // "")])
+      ]
+    | .[] | @tsv
+  ' 2>/dev/null)
+
+  while IFS=$'\t' read -r label bucket_pct bucket_reset; do
+    [ -z "$label" ] && continue
+    cache_window_valid "$bucket_reset" || continue
+    bucket_n=$(echo "$bucket_pct" | awk '{printf "%.0f", $1}')
+    bucket_reset_fmt=$(format_reset_time "$bucket_reset" "datetime")
+    bucket_bar=$(build_bar "$bucket_n" "$bar_width")
+    bucket_color=$(color_for_pct "$bucket_n")
+    [ -n "$rate_lines" ] && rate_lines+="${sep}"
+    rate_lines+="${white}${label}${reset} ${bucket_bar} ${bucket_color}${bucket_n}%${reset}"
+    [ -n "$bucket_reset_fmt" ] && rate_lines+=" ${white}${bucket_reset_fmt}${reset}"
+  done <<<"$codex_rows"
 fi
 
 # ── Output ──────────────────────────────────────────────

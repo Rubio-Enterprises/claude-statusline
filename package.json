@@ -16,7 +16,7 @@
   "scripts": {
     "lint": "biome check .",
     "typecheck": "echo 'JS-only repo: nothing to typecheck (temporary until template v1.55.3 makes the mise task --if-present)'",
-    "test": "echo \"no automated tests — statusline is a bash + install-shim CLI\" && exit 0"
+    "test": "bash .claude/skills/run-claude-statusline/driver.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.7"

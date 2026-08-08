@@ -15,8 +15,9 @@ All paths below are relative to the repo root.
 ## Prerequisites
 
 Runtime deps the renderer and installer actually shell out to: `jq` (JSON),
-`curl` (rate-limit fetch), `git` (branch). `node` runs the installer. All four
-were already present in this container; on a bare Ubuntu box:
+`curl` (default Claude rate-limit fetch), `git` (branch), and optionally `codex`
+when `STATUSLINE_RATE_LIMIT_PROVIDER=codex`. `node` runs the installer. The base
+dependencies were already present in this container; on a bare Ubuntu box:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y jq curl git
@@ -35,14 +36,14 @@ npm install   # optional — only for `npm run lint` / git hooks
 
 ## Run (agent path)
 
-**Drive everything with the smoke driver.** It pipes representative payloads
-into `statusline.sh`, checks the empty-stdin fallback and model-id
-normalization, and runs an install/uninstall roundtrip against a throwaway
-`HOME` — all hermetic (no network, isolated cache):
+**Drive everything with the integration driver.** It covers Claude and Codex
+provider rendering/cache behavior, validates the Codex JSONL handshake through
+a fake `codex` on `PATH`, checks fallbacks/model normalization, and runs an
+install/uninstall roundtrip — all hermetic (no network, isolated cache):
 
 ```bash
 bash .claude/skills/run-claude-statusline/driver.sh
-# → 12 passed, 0 failed   (exit 0)
+# → 97 passed, 0 failed   (exit 0)
 ```
 
 To see the **actual rendered line** for a payload (debugging a render change),
@@ -86,12 +87,12 @@ npx @kamranahmedse/claude-statusline --uninstall # remove
 
 ## Test
 
-No automated test suite — the driver above is the smoke test. The package
-scripts are a lint floor and a no-op:
+The integration driver is the canonical automated suite and is wired through
+both `npm test` and the repository-local `test-gate` workflow:
 
 ```bash
 npm run lint   # biome check . — exit 0 (warnings/infos are non-blocking)
-npm run test   # prints "no automated tests…" and exits 0
+npm test       # 97 hermetic renderer/installer assertions
 ```
 
 ## Gotchas
