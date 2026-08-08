@@ -204,6 +204,19 @@ has "Claude current percentage rounds" "$plain" "24%"
 has "Claude weekly percentage rounds" "$plain" "61%"
 lacks "Claude mode has no Codex general label" "$plain" "gen."
 lacks "Claude mode has no Codex Spark label" "$plain" "spark."
+partial_reset_payload=$(printf '%s' "$claude_payload" | jq -c 'del(.rate_limits.five_hour.resets_at, .rate_limits.seven_day.resets_at)')
+partial_reset=$(STATUSLINE_CACHE_DIR="$claude_cache" bash "$SL" <<<"$partial_reset_payload" | strip_ansi)
+partial_reset_line=${partial_reset#*$'\n'}
+if [[ "$partial_reset_line" =~ cur\..*24%.*(am|pm) ]]; then
+  ok "Claude cache fills missing current reset independently"
+else
+  no "Claude cache did not fill the live current percentage reset"
+fi
+if [[ "$partial_reset_line" =~ wk\..*61%.*@.*(am|pm) ]]; then
+  ok "Claude cache fills missing weekly reset independently"
+else
+  no "Claude cache did not fill the live weekly percentage reset"
+fi
 first_line=${plain%%$'\n'*}
 second_line=${plain#*$'\n'}
 if [ "$ROOT" = "$HOME" ]; then
@@ -424,6 +437,22 @@ FAKE_CODEX_MODE=rpc-error run_statusline codex "$rpc_error_cache" "$base_payload
 sleep 0.2
 second_error_fetches=$(grep -c '^argv' "$CODEX_LOG" || true)
 equals "Codex failure backoff suppresses repeated app-server starts" "$second_error_fetches" "$first_error_fetches"
+
+failure_auth_home="$WORK/codex-failure-auth-home"
+mkdir -p "$failure_auth_home"
+printf '{}\n' >"$failure_auth_home/auth.json"
+failure_auth_cache="$WORK/codex-failure-auth"
+FAKE_CODEX_MODE=rpc-error CODEX_HOME="$failure_auth_home" \
+  run_statusline codex "$failure_auth_cache" "$base_payload" >/dev/null
+wait_for_file "$failure_auth_cache/statusline-codex-refresh-failed" || true
+printf ' \n' >>"$failure_auth_home/auth.json"
+export FAKE_CODEX_RESPONSE_FILE="$response"
+CODEX_HOME="$failure_auth_home" run_statusline codex "$failure_auth_cache" "$base_payload" >/dev/null
+if wait_for_file "$failure_auth_cache/statusline-codex-usage-cache.json"; then
+  ok "account change clears previous-account failure backoff"
+else
+  no "previous-account failure backoff blocked the new account refresh"
+fi
 
 printf '%s\n' "[6] Codex auth.json metadata invalidation"
 auth_home="$WORK/codex-home"

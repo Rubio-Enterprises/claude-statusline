@@ -43,7 +43,7 @@ install/uninstall roundtrip — all hermetic (no network, isolated cache):
 
 ```bash
 bash .claude/skills/run-claude-statusline/driver.sh
-# → 87 passed, 0 failed   (exit 0)
+# → 90 passed, 0 failed   (exit 0)
 ```
 
 To see the **actual rendered line** for a payload (debugging a render change),
@@ -92,7 +92,7 @@ both `npm test` and the repository-local `test-gate` workflow:
 
 ```bash
 npm run lint   # biome check . — exit 0 (warnings/infos are non-blocking)
-npm test       # 87 hermetic renderer/installer assertions
+npm test       # 90 hermetic renderer/installer assertions
 ```
 
 ## Gotchas

@@ -474,6 +474,20 @@ write_codex_auth_state_atomic() {
   }
 }
 
+write_codex_failure_marker() {
+  local metadata tmp
+  metadata=$(codex_auth_metadata)
+  tmp="${failure_file}.tmp.$$.${RANDOM}"
+  printf '%s' "$metadata" >"$tmp" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+  mv -f "$tmp" "$failure_file" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+}
+
 refresh_codex_auth_state() {
   local now lmtime lock_age metadata
   if ! mkdir "$auth_lock_dir" 2>/dev/null; then
@@ -667,7 +681,7 @@ refresh_singleflight() {
     if $refresh_succeeded; then
       rm -f "$failure_file" 2>/dev/null
     else
-      : >"$failure_file" 2>/dev/null
+      write_codex_failure_marker
     fi
     ;;
   esac
@@ -678,11 +692,17 @@ refresh_singleflight() {
 
 # Kick a refresh in the background so this render only ever reads stdin/cache.
 trigger_refresh() {
-  local failure_mtime failure_age
+  local failure_mtime failure_age failure_auth_metadata current_auth_metadata
   if [ -n "$failure_file" ] && [ -f "$failure_file" ]; then
-    failure_mtime=$(file_mtime "$failure_file")
-    [ -n "$failure_mtime" ] && failure_age=$(($(date +%s) - failure_mtime))
-    [ -n "${failure_age:-}" ] && [ "$failure_age" -lt "$codex_failure_ttl" ] && return 0
+    failure_auth_metadata=$(cat "$failure_file" 2>/dev/null)
+    current_auth_metadata=$(codex_auth_metadata)
+    if [ "$failure_auth_metadata" != "$current_auth_metadata" ]; then
+      rm -f "$failure_file" 2>/dev/null
+    else
+      failure_mtime=$(file_mtime "$failure_file")
+      [ -n "$failure_mtime" ] && failure_age=$(($(date +%s) - failure_mtime))
+      [ -n "${failure_age:-}" ] && [ "$failure_age" -lt "$codex_failure_ttl" ] && return 0
+    fi
   fi
   (refresh_singleflight >/dev/null 2>&1 &) >/dev/null 2>&1
 }
@@ -753,7 +773,9 @@ if [ "$rate_limit_provider" = "claude" ]; then
   seven_pct=""
   seven_reset=""
   five_from_cache=false
+  five_reset_from_cache=false
   seven_from_cache=false
+  seven_reset_from_cache=false
   if $stdin_has_rl; then
     five_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
     five_reset=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
@@ -763,18 +785,28 @@ if [ "$rate_limit_provider" = "claude" ]; then
   if [ -n "$cache_data" ]; then
     if [ -z "$five_pct" ]; then
       five_pct=$(echo "$cache_data" | jq -r '.five_hour.utilization // empty')
-      five_reset=$(echo "$cache_data" | jq -r '.five_hour.resets_at // empty')
       five_from_cache=true
+    fi
+    if [ -z "$five_reset" ]; then
+      five_reset=$(echo "$cache_data" | jq -r '.five_hour.resets_at // empty')
+      five_reset_from_cache=true
     fi
     if [ -z "$seven_pct" ]; then
       seven_pct=$(echo "$cache_data" | jq -r '.seven_day.utilization // empty')
-      seven_reset=$(echo "$cache_data" | jq -r '.seven_day.resets_at // empty')
       seven_from_cache=true
+    fi
+    if [ -z "$seven_reset" ]; then
+      seven_reset=$(echo "$cache_data" | jq -r '.seven_day.resets_at // empty')
+      seven_reset_from_cache=true
     fi
   fi
 
-  $five_from_cache && ! cache_window_valid "$five_reset" && five_pct=""
-  $seven_from_cache && ! cache_window_valid "$seven_reset" && seven_pct=""
+  if $five_reset_from_cache && ! cache_window_valid "$five_reset"; then
+    if $five_from_cache; then five_pct=""; else five_reset=""; fi
+  fi
+  if $seven_reset_from_cache && ! cache_window_valid "$seven_reset"; then
+    if $seven_from_cache; then seven_pct=""; else seven_reset=""; fi
+  fi
 
   if [ -n "$five_pct" ]; then
     five_n=$(echo "$five_pct" | awk '{printf "%.0f", $1}')
