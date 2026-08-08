@@ -57,6 +57,24 @@ wait_for_absent() {
   done
   return 1
 }
+wait_for_log() {
+  local path="$1" i
+  for ((i = 0; i < 100; i++)); do
+    [ -s "$path" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+wait_for_codex_pct() {
+  local cache_file="$1" expected="$2" i actual
+  for ((i = 0; i < 100; i++)); do
+    actual=$(jq -r '(.data.rateLimits.primary.usedPercent // .data.rateLimitsByLimitId.codex.primary.usedPercent // empty)' \
+      "$cache_file" 2>/dev/null)
+    [ "$actual" = "$expected" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
 file_metadata() {
   stat -c '%Y:%s:%i' "$1" 2>/dev/null || stat -f '%m:%z:%i' "$1" 2>/dev/null
 }
@@ -118,6 +136,7 @@ chmod +x "$FAKE_BIN/security"
 cat >"$FAKE_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
 if [ "$*" = "login status" ]; then
+  [ -n "${FAKE_CODEX_LOGIN_SLEEP:-}" ] && sleep "$FAKE_CODEX_LOGIN_SLEEP"
   if [ "${FAKE_CODEX_LOGIN_STATUS:-logged-in}" = "logged-out" ]; then
     printf '%s\n' 'Not logged in' >&2
     exit 1
@@ -137,6 +156,10 @@ while IFS= read -r line; do
     case "${FAKE_CODEX_MODE:-success}" in
     fail) exit 1 ;;
     slow) sleep "${FAKE_CODEX_SLEEP:-0.5}" ;;
+    rpc-error)
+      jq -cn '{id: 2, error: {code: -32000, message: "authentication required"}}'
+      continue
+      ;;
     esac
     result=$(jq -c . "$FAKE_CODEX_RESPONSE_FILE")
     jq -cn --argjson result "$result" '{id: 2, result: $result}'
@@ -174,7 +197,14 @@ lacks "Claude mode has no Codex general label" "$plain" "gen."
 lacks "Claude mode has no Codex Spark label" "$plain" "spark."
 first_line=${plain%%$'\n'*}
 second_line=${plain#*$'\n'}
-has "cwd remains trailing and home-abbreviated" "$first_line" "~${ROOT#"$HOME"}"
+if [ "$ROOT" = "$HOME" ]; then
+  expected_cwd="~"
+elif [[ "$ROOT" == "$HOME/"* ]]; then
+  expected_cwd="~${ROOT#"$HOME"}"
+else
+  expected_cwd="$ROOT"
+fi
+has "cwd remains trailing and conditionally home-abbreviated" "$first_line" "$expected_cwd"
 case "$second_line" in
 "15% │ "*) no "effort precedes context on the second line — got '$second_line'" ;;
 *" │ 15% │ "*) ok "effort precedes context on the second line" ;;
@@ -253,6 +283,21 @@ equals "Codex sends initialize, initialized, read JSONL sequence" "$methods" "in
 read_request=$(grep '^json' "$CODEX_LOG" | cut -f2- | jq -c 'select(.method == "account/rateLimits/read")')
 equals "Codex read request uses id=2 and null params" "$read_request" '{"id":2,"method":"account/rateLimits/read","params":null}'
 
+by_id_only="$WORK/codex-by-id-only.json"
+cat >"$by_id_only" <<EOF
+{"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":54,"windowDurationMins":10080,"resetsAt":$far}}}}
+EOF
+export FAKE_CODEX_RESPONSE_FILE="$by_id_only"
+by_id_cache="$WORK/codex-by-id-only"
+run_statusline codex "$by_id_cache" "$base_payload" >/dev/null
+if wait_for_file "$by_id_cache/statusline-codex-usage-cache.json"; then
+  ok "rateLimitsByLimitId-only response passes the cache gate"
+else
+  no "rateLimitsByLimitId-only response was not cached"
+fi
+by_id_rendered=$(run_statusline codex "$by_id_cache" "$base_payload" | strip_ansi)
+has "rateLimitsByLimitId-only cache renders general usage" "$by_id_rendered" "54%"
+
 printf '%s\n' "[3] Codex partial and irrelevant bucket behavior"
 spark_only="$WORK/spark-only.json"
 cat >"$spark_only" <<EOF
@@ -264,6 +309,15 @@ partial=$(run_statusline codex "$partial_cache" "$base_payload" | strip_ansi)
 has "missing general bucket still shows Spark" "$partial" "spark."
 has "partial Spark bucket shows its percentage" "$partial" "43%"
 lacks "missing general bucket stays hidden" "$partial" "gen."
+resetless="$WORK/resetless.json"
+cat >"$resetless" <<EOF
+{"rateLimits":{"limitId":"codex","primary":{"usedPercent":57,"windowDurationMins":10080,"resetsAt":null}},"rateLimitsByLimitId":{}}
+EOF
+resetless_cache="$WORK/codex-resetless"
+write_codex_cache "$resetless_cache" "" "$resetless"
+resetless_rendered=$(run_statusline codex "$resetless_cache" "$base_payload" | strip_ansi)
+has "weekly Codex usage renders without reset metadata" "$resetless_rendered" "gen."
+has "resetless Codex bucket keeps its percentage" "$resetless_rendered" "57%"
 irrelevant="$WORK/irrelevant.json"
 cat >"$irrelevant" <<EOF
 {"rateLimits":{"limitId":"codex","primary":{"usedPercent":51,"windowDurationMins":300,"resetsAt":$far}},"rateLimitsByLimitId":{"other":{"limitId":"other","limitName":"Other","primary":{"usedPercent":52,"windowDurationMins":10080,"resetsAt":$far}}}}
@@ -318,7 +372,7 @@ else
 fi
 : >"$CODEX_LOG"
 stale=$(FAKE_CODEX_MODE=fail STATUSLINE_CODEX_TTL=0 run_statusline codex "$ttl_cache" "$base_payload" | strip_ansi)
-wait_for_absent "$ttl_cache/statusline-codex-refresh.lock" || true
+wait_for_log "$CODEX_LOG" || true
 has "failed refresh serves valid same-provider stale cache" "$stale" "gen."
 if [ -s "$CODEX_LOG" ]; then
   ok "expired Codex TTL triggers background refresh"
@@ -339,6 +393,20 @@ write_codex_cache "$expired_cache" "" "$expired_response"
 expired=$(FAKE_CODEX_MODE=fail run_statusline codex "$expired_cache" "$base_payload" | strip_ansi)
 lacks "Codex weekly window is hidden after its reset epoch" "$expired" "gen."
 
+rpc_error_cache="$WORK/codex-rpc-error"
+: >"$CODEX_LOG"
+FAKE_CODEX_MODE=rpc-error run_statusline codex "$rpc_error_cache" "$base_payload" >/dev/null
+if wait_for_file "$rpc_error_cache/statusline-codex-refresh-failed"; then
+  ok "Codex JSON-RPC errors terminate refresh and record backoff"
+else
+  no "Codex JSON-RPC error did not finish within the bounded wait"
+fi
+first_error_fetches=$(grep -c '^argv' "$CODEX_LOG" || true)
+FAKE_CODEX_MODE=rpc-error run_statusline codex "$rpc_error_cache" "$base_payload" >/dev/null
+sleep 0.2
+second_error_fetches=$(grep -c '^argv' "$CODEX_LOG" || true)
+equals "Codex failure backoff suppresses repeated app-server starts" "$second_error_fetches" "$first_error_fetches"
+
 printf '%s\n' "[6] Codex auth.json metadata invalidation"
 auth_home="$WORK/codex-home"
 mkdir -p "$auth_home"
@@ -356,7 +424,7 @@ printf ' \n' >>"$auth_home/auth.json"
 auth_changed=$(CODEX_HOME="$auth_home" run_statusline codex "$auth_cache" "$base_payload" | strip_ansi)
 lacks "changed auth metadata immediately invalidates old account cache" "$auth_changed" "31%"
 lacks "invalidated auth cache is not displayed during refresh" "$auth_changed" "gen."
-if wait_for_file "$auth_cache/statusline-codex-usage-cache.json" && wait_for_absent "$auth_cache/statusline-codex-refresh.lock"; then
+if wait_for_codex_pct "$auth_cache/statusline-codex-usage-cache.json" "44"; then
   ok "auth change triggers background active-account refresh"
 else
   no "auth change did not complete a background refresh"
@@ -401,9 +469,39 @@ lacks "keyring logout immediately hides previous account cache" "$keyring_logout
 unset FAKE_CODEX_KEYCHAIN_METADATA_FILE FAKE_CODEX_KEYCHAIN_ACCOUNT
 status_cache="$WORK/codex-login-status"
 write_codex_cache "$status_cache" "" "$response"
+STATUSLINE_CODEX_AUTH_PROBE_TTL=0 run_statusline codex "$status_cache" "$base_payload" >/dev/null
+logged_in_metadata=$(codex_login_metadata)
+for _ in {1..100}; do
+  [ "$(cat "$status_cache/statusline-codex-auth-metadata" 2>/dev/null)" = "$logged_in_metadata" ] && break
+  sleep 0.05
+done
+FAKE_CODEX_LOGIN_STATUS=logged-out STATUSLINE_CODEX_AUTH_PROBE_TTL=0 \
+  run_statusline codex "$status_cache" "$base_payload" >/dev/null
+logged_out_metadata=$(codex_login_metadata "Not logged in" 1)
+for _ in {1..100}; do
+  [ "$(cat "$status_cache/statusline-codex-auth-metadata" 2>/dev/null)" = "$logged_out_metadata" ] && break
+  sleep 0.05
+done
 status_logout=$(FAKE_CODEX_LOGIN_STATUS=logged-out FAKE_CODEX_MODE=fail \
   run_statusline codex "$status_cache" "$base_payload" | strip_ansi)
-lacks "login-status fallback invalidates keyring cache on logout" "$status_logout" "gen."
+lacks "detached login-status probe invalidates keyring cache on logout" "$status_logout" "gen."
+
+slow_probe_cache="$WORK/codex-slow-auth-probe"
+write_codex_cache "$slow_probe_cache" "$logged_in_metadata" "$response"
+printf '%s' "$logged_in_metadata" >"$slow_probe_cache/statusline-codex-auth-metadata"
+slow_probe_output=$(FAKE_CODEX_LOGIN_SLEEP=2 STATUSLINE_CODEX_AUTH_PROBE_TTL=0 \
+  run_statusline codex "$slow_probe_cache" "$base_payload" | strip_ansi)
+has "slow login-status probing stays off the render hot path" "$slow_probe_output" "gen."
+for _ in {1..100}; do
+  [ -d "$slow_probe_cache/statusline-codex-auth-refresh.lock" ] && break
+  sleep 0.05
+done
+if [ -d "$slow_probe_cache/statusline-codex-auth-refresh.lock" ]; then
+  ok "slow login-status probe continues in the detached background"
+else
+  no "slow login-status probe did not start in the background"
+fi
+wait_for_absent "$slow_probe_cache/statusline-codex-auth-refresh.lock" || true
 
 printf '%s\n' "[8] Host-wide Codex single-flight"
 export FAKE_CODEX_RESPONSE_FILE="$response"

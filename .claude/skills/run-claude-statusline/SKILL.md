@@ -43,7 +43,7 @@ install/uninstall roundtrip — all hermetic (no network, isolated cache):
 
 ```bash
 bash .claude/skills/run-claude-statusline/driver.sh
-# → 71 passed, 0 failed   (exit 0)
+# → 79 passed, 0 failed   (exit 0)
 ```
 
 To see the **actual rendered line** for a payload (debugging a render change),
@@ -87,12 +87,12 @@ npx @kamranahmedse/claude-statusline --uninstall # remove
 
 ## Test
 
-No automated test suite — the driver above is the smoke test. The package
-scripts are a lint floor and a no-op:
+The integration driver is the canonical automated suite and is wired through
+both `npm test` and the repository-local `test-gate` workflow:
 
 ```bash
 npm run lint   # biome check . — exit 0 (warnings/infos are non-blocking)
-npm run test   # prints "no automated tests…" and exits 0
+npm test       # 79 hermetic renderer/installer assertions
 ```
 
 ## Gotchas

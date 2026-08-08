@@ -377,6 +377,11 @@ ua_version="${STATUSLINE_UA_VERSION:-2.1.156}"
 cache_file=""
 lock_dir=""
 provider_ttl=""
+auth_state_file=""
+auth_lock_dir=""
+failure_file=""
+codex_auth_probe_ttl="${STATUSLINE_CODEX_AUTH_PROBE_TTL:-5}"
+codex_failure_ttl="${STATUSLINE_CODEX_FAILURE_TTL:-30}"
 
 case "$rate_limit_provider" in
 claude)
@@ -388,6 +393,9 @@ claude)
 codex)
   cache_file="${cache_dir}/statusline-codex-usage-cache.json"
   lock_dir="${cache_dir}/statusline-codex-refresh.lock"
+  auth_state_file="${cache_dir}/statusline-codex-auth-metadata"
+  auth_lock_dir="${cache_dir}/statusline-codex-auth-refresh.lock"
+  failure_file="${cache_dir}/statusline-codex-refresh-failed"
   provider_ttl="${STATUSLINE_CODEX_TTL:-300}"
   ;;
 esac
@@ -401,9 +409,7 @@ file_mtime() {
 # opening auth.json or exposing any credential value. File-backed auth uses
 # stat metadata. On macOS, keyring-backed auth hashes only the item's public
 # attributes (security omits the secret unless explicitly asked for -w/-g).
-# Other keyring backends fall back to the non-secret `codex login status`
-# result, which at least invalidates immediately on login/logout transitions.
-codex_auth_metadata() {
+codex_direct_auth_metadata() {
   local codex_home="${CODEX_HOME:-$HOME/.codex}"
   local auth_file="${codex_home}/auth.json"
   if [ -f "$auth_file" ]; then
@@ -425,13 +431,85 @@ codex_auth_metadata() {
       fi
     fi
   fi
+}
 
-  command -v codex >/dev/null 2>&1 || return 0
-  local login_status login_rc
-  login_status=$(codex login status 2>&1)
-  login_rc=$?
-  printf 'status:%s:' "$login_rc"
-  printf '%s' "$login_status" | cksum | awk '{printf "%s:%s", $1, $2}'
+# Other keyring backends expose no safe account-specific public metadata. Probe
+# their non-secret login state asynchronously and bound the CLI in case keyring
+# access stalls. This detects login/logout without putting Codex on the render
+# hot path; direct account-to-account switches converge on the normal cache TTL.
+codex_login_status_metadata() {
+  command -v codex >/dev/null 2>&1 || return 1
+  local output pid i login_rc login_status
+  output="${auth_state_file}.probe.$$.${RANDOM}"
+  codex login status >"$output" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 20; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      login_rc=$?
+      login_status=$(cat "$output" 2>/dev/null)
+      rm -f "$output"
+      printf 'status:%s:' "$login_rc"
+      printf '%s' "$login_status" | cksum | awk '{printf "%s:%s", $1, $2}'
+      return 0
+    fi
+    sleep 0.05
+  done
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  rm -f "$output"
+  return 1
+}
+
+write_codex_auth_state_atomic() {
+  local metadata="$1" tmp
+  tmp="${auth_state_file}.tmp.$$.${RANDOM}"
+  printf '%s' "$metadata" >"$tmp" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+  mv -f "$tmp" "$auth_state_file" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
+}
+
+refresh_codex_auth_state() {
+  local now lmtime lock_age metadata
+  if ! mkdir "$auth_lock_dir" 2>/dev/null; then
+    now=$(date +%s)
+    lmtime=$(file_mtime "$auth_lock_dir")
+    [ -z "$lmtime" ] && lmtime=$now
+    lock_age=$((now - lmtime))
+    [ "$lock_age" -lt "$lock_maxage" ] && return 1
+    rmdir "$auth_lock_dir" 2>/dev/null || return 1
+    mkdir "$auth_lock_dir" 2>/dev/null || return 1
+  fi
+  metadata=$(codex_login_status_metadata)
+  [ -n "$metadata" ] && write_codex_auth_state_atomic "$metadata"
+  rmdir "$auth_lock_dir" 2>/dev/null
+}
+
+trigger_codex_auth_probe() {
+  local state_mtime state_age
+  [ "$rate_limit_provider" = "codex" ] || return 0
+  [ -n "$(codex_direct_auth_metadata)" ] && return 0
+  if [ -f "$auth_state_file" ]; then
+    state_mtime=$(file_mtime "$auth_state_file")
+    [ -n "$state_mtime" ] && state_age=$(($(date +%s) - state_mtime))
+    [ -n "${state_age:-}" ] && [ "$state_age" -lt "$codex_auth_probe_ttl" ] && return 0
+  fi
+  (refresh_codex_auth_state >/dev/null 2>&1 &) >/dev/null 2>&1
+}
+
+codex_auth_metadata() {
+  local metadata
+  metadata=$(codex_direct_auth_metadata)
+  if [ -n "$metadata" ]; then
+    printf '%s' "$metadata"
+  elif [ -f "$auth_state_file" ]; then
+    cat "$auth_state_file" 2>/dev/null
+  fi
 }
 
 # Atomic cache write: temp-then-mv in the SAME dir (same filesystem → atomic
@@ -496,6 +574,9 @@ fetch_codex() {
       response=$(jq -s -c 'map(select(.id == 2 and .result != null)) | last.result' "$output" 2>/dev/null)
       break
     fi
+    if $initialized && jq -s -e 'any(.[]; .id == 2 and .error != null)' "$output" >/dev/null 2>&1; then
+      break
+    fi
     kill -0 "$server_pid" 2>/dev/null || break
     sleep 0.05
   done
@@ -553,7 +634,7 @@ refresh_singleflight() {
     return 1
   }
 
-  local resp cache_payload auth_metadata
+  local resp cache_payload auth_metadata refresh_succeeded=false
   resp=$(fetch_provider)
   case "$rate_limit_provider" in
   claude)
@@ -562,11 +643,21 @@ refresh_singleflight() {
     fi
     ;;
   codex)
-    if [ -n "$resp" ] && echo "$resp" | jq -e '.rateLimits' >/dev/null 2>&1; then
-      auth_metadata=$(codex_auth_metadata)
+    if [ -n "$resp" ] && echo "$resp" |
+      jq -e '(.rateLimits != null) or ((.rateLimitsByLimitId // {}) | length > 0)' >/dev/null 2>&1; then
+      auth_metadata=$(codex_direct_auth_metadata)
+      if [ -z "$auth_metadata" ]; then
+        auth_metadata=$(codex_login_status_metadata)
+        [ -n "$auth_metadata" ] && write_codex_auth_state_atomic "$auth_metadata"
+      fi
       cache_payload=$(jq -cn --arg authMetadata "$auth_metadata" --argjson data "$resp" \
         '{authMetadata: $authMetadata, data: $data}')
-      write_cache_atomic "$cache_payload"
+      write_cache_atomic "$cache_payload" && refresh_succeeded=true
+    fi
+    if $refresh_succeeded; then
+      rm -f "$failure_file" 2>/dev/null
+    else
+      : >"$failure_file" 2>/dev/null
     fi
     ;;
   esac
@@ -577,6 +668,12 @@ refresh_singleflight() {
 
 # Kick a refresh in the background so this render only ever reads stdin/cache.
 trigger_refresh() {
+  local failure_mtime failure_age
+  if [ -n "$failure_file" ] && [ -f "$failure_file" ]; then
+    failure_mtime=$(file_mtime "$failure_file")
+    [ -n "$failure_mtime" ] && failure_age=$(($(date +%s) - failure_mtime))
+    [ -n "${failure_age:-}" ] && [ "$failure_age" -lt "$codex_failure_ttl" ] && return 0
+  fi
   (refresh_singleflight >/dev/null 2>&1 &) >/dev/null 2>&1
 }
 
@@ -588,6 +685,7 @@ now=$(date +%s)
 
 if [ -n "$cache_file" ]; then
   mkdir -p "$cache_dir"
+  trigger_codex_auth_probe
   if [ -f "$cache_file" ]; then
     cmtime=$(file_mtime "$cache_file")
     [ -n "$cmtime" ] && cache_age=$((now - cmtime))
@@ -596,7 +694,13 @@ if [ -n "$cache_file" ]; then
       if [ "$rate_limit_provider" = "codex" ]; then
         cached_auth_metadata=$(echo "$raw_cache" | jq -r '.authMetadata // ""')
         current_auth_metadata=$(codex_auth_metadata)
-        [ "$cached_auth_metadata" != "$current_auth_metadata" ] && cache_auth_valid=false
+        if [ -n "$current_auth_metadata" ]; then
+          [ "$cached_auth_metadata" != "$current_auth_metadata" ] && cache_auth_valid=false
+        else
+          case "$cached_auth_metadata" in
+          file:* | keychain:*) cache_auth_valid=false ;;
+          esac
+        fi
         $cache_auth_valid && cache_data=$(echo "$raw_cache" | jq -c '.data // empty')
       else
         cache_data="$raw_cache"
@@ -702,14 +806,15 @@ elif [ "$rate_limit_provider" = "codex" ] && [ -n "$cache_data" ]; then
   ' 2>/dev/null)
 
   while IFS=$'\t' read -r label bucket_pct bucket_reset; do
-    [ -z "$label" ] || [ -z "$bucket_reset" ] && continue
+    [ -z "$label" ] && continue
     cache_window_valid "$bucket_reset" || continue
     bucket_n=$(echo "$bucket_pct" | awk '{printf "%.0f", $1}')
     bucket_reset_fmt=$(format_reset_time "$bucket_reset" "datetime")
     bucket_bar=$(build_bar "$bucket_n" "$bar_width")
     bucket_color=$(color_for_pct "$bucket_n")
     [ -n "$rate_lines" ] && rate_lines+="${sep}"
-    rate_lines+="${white}${label}${reset} ${bucket_bar} ${bucket_color}${bucket_n}%${reset} ${white}${bucket_reset_fmt}${reset}"
+    rate_lines+="${white}${label}${reset} ${bucket_bar} ${bucket_color}${bucket_n}%${reset}"
+    [ -n "$bucket_reset_fmt" ] && rate_lines+=" ${white}${bucket_reset_fmt}${reset}"
   done <<<"$codex_rows"
 fi
 
