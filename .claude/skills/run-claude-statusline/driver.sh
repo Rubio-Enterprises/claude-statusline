@@ -133,6 +133,11 @@ chmod +x "$FAKE_BIN/curl"
 
 cat >"$FAKE_BIN/security" <<'EOF'
 #!/usr/bin/env bash
+if [ "${FAKE_SECURITY_MODE:-}" = "ignore-term" ]; then
+  trap '' TERM
+  while :; do sleep 0.1; done
+fi
+[ -n "${FAKE_SECURITY_SLEEP:-}" ] && sleep "$FAKE_SECURITY_SLEEP"
 if [ "$*" = "find-generic-password -s Codex Auth -a ${FAKE_CODEX_KEYCHAIN_ACCOUNT:-}" ] \
   && [ -f "${FAKE_CODEX_KEYCHAIN_METADATA_FILE:-}" ]; then
   cat "$FAKE_CODEX_KEYCHAIN_METADATA_FILE"
@@ -145,6 +150,11 @@ chmod +x "$FAKE_BIN/security"
 cat >"$FAKE_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
 if [ "$*" = "login status" ]; then
+  [ -n "${FAKE_CODEX_LOGIN_LOG:-}" ] && printf '%s\n' attempt >>"$FAKE_CODEX_LOGIN_LOG"
+  if [ "${FAKE_CODEX_LOGIN_MODE:-}" = "ignore-term" ]; then
+    trap '' TERM
+    while :; do sleep 0.1; done
+  fi
   [ -n "${FAKE_CODEX_LOGIN_SLEEP:-}" ] && sleep "$FAKE_CODEX_LOGIN_SLEEP"
   login_state="${FAKE_CODEX_LOGIN_STATUS:-logged-in}"
   [ -f "${FAKE_CODEX_LOGIN_STATUS_FILE:-}" ] && login_state=$(cat "$FAKE_CODEX_LOGIN_STATUS_FILE")
@@ -618,6 +628,50 @@ else
   no "slow login-status probe did not start in the background"
 fi
 wait_for_absent "$slow_probe_cache/statusline-codex-auth-refresh.lock" || true
+
+ignored_probe_cache="$WORK/codex-ignored-auth-probe"
+write_codex_cache "$ignored_probe_cache" "$logged_in_metadata" "$response"
+printf '%s' "$logged_in_metadata" >"$ignored_probe_cache/statusline-codex-auth-metadata"
+FAKE_CODEX_LOGIN_MODE=ignore-term STATUSLINE_CODEX_AUTH_PROBE_TTL=0 \
+  run_statusline codex "$ignored_probe_cache" "$base_payload" >/dev/null
+for _ in {1..100}; do
+  [ -d "$ignored_probe_cache/statusline-codex-auth-refresh.lock" ] && break
+  sleep 0.05
+done
+if wait_for_absent "$ignored_probe_cache/statusline-codex-auth-refresh.lock"; then
+  ok "login-status timeout escalates ignored SIGTERM and releases its lock"
+else
+  no "login-status probe remained blocked after its timeout"
+fi
+
+probe_backoff_cache="$WORK/codex-auth-probe-backoff"
+write_codex_cache "$probe_backoff_cache" "" "$response"
+probe_backoff_log="$WORK/codex-auth-probe-backoff.log"
+: >"$probe_backoff_log"
+FAKE_CODEX_LOGIN_LOG="$probe_backoff_log" FAKE_CODEX_LOGIN_MODE=ignore-term \
+  run_statusline codex "$probe_backoff_cache" "$base_payload" >/dev/null
+for _ in {1..100}; do
+  [ -d "$probe_backoff_cache/statusline-codex-auth-refresh.lock" ] && break
+  sleep 0.05
+done
+wait_for_absent "$probe_backoff_cache/statusline-codex-auth-refresh.lock" || true
+first_probe_attempts=$(wc -l <"$probe_backoff_log" | tr -d ' ')
+FAKE_CODEX_LOGIN_LOG="$probe_backoff_log" FAKE_CODEX_LOGIN_MODE=ignore-term \
+  run_statusline codex "$probe_backoff_cache" "$base_payload" >/dev/null
+sleep 0.2
+second_probe_attempts=$(wc -l <"$probe_backoff_log" | tr -d ' ')
+equals "failed auth probe advances its TTL backoff" "$second_probe_attempts" "$first_probe_attempts"
+
+bounded_security_cache="$WORK/codex-bounded-security"
+write_codex_cache "$bounded_security_cache" "" "$response"
+SECONDS=0
+FAKE_SECURITY_MODE=ignore-term run_statusline codex "$bounded_security_cache" "$base_payload" >/dev/null
+security_elapsed=$SECONDS
+if [ "$security_elapsed" -lt 5 ]; then
+  ok "locked macOS Keychain metadata lookup remains bounded"
+else
+  no "macOS Keychain metadata lookup blocked the render for ${security_elapsed}s"
+fi
 
 printf '%s\n' "[8] Host-wide Codex single-flight"
 export FAKE_CODEX_RESPONSE_FILE="$response"

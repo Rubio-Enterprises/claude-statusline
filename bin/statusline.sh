@@ -378,6 +378,7 @@ cache_file=""
 lock_dir=""
 provider_ttl=""
 auth_state_file=""
+auth_attempt_file=""
 auth_lock_dir=""
 failure_file=""
 codex_auth_probe_ttl="${STATUSLINE_CODEX_AUTH_PROBE_TTL:-5}"
@@ -394,6 +395,7 @@ codex)
   cache_file="${cache_dir}/statusline-codex-usage-cache.json"
   lock_dir="${cache_dir}/statusline-codex-refresh.lock"
   auth_state_file="${cache_dir}/statusline-codex-auth-metadata"
+  auth_attempt_file="${cache_dir}/statusline-codex-auth-attempt"
   auth_lock_dir="${cache_dir}/statusline-codex-auth-refresh.lock"
   failure_file="${cache_dir}/statusline-codex-refresh-failed"
   provider_ttl="${STATUSLINE_CODEX_TTL:-300}"
@@ -403,6 +405,40 @@ esac
 # mtime in epoch seconds, portable (GNU stat -c, then BSD stat -f).
 file_mtime() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+stop_process_bounded() {
+  local pid="$1" stop_tick
+  kill "$pid" 2>/dev/null
+  for ((stop_tick = 0; stop_tick < 5; stop_tick++)); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null
+  fi
+  wait "$pid" 2>/dev/null
+}
+
+bounded_security_metadata() {
+  local keychain_account="$1" output pid poll_tick exit_code metadata
+  output="${cache_dir}/codex-security.$$.${RANDOM}"
+  security find-generic-password -s "Codex Auth" -a "$keychain_account" >"$output" 2>/dev/null &
+  pid=$!
+  for ((poll_tick = 0; poll_tick < 20; poll_tick++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      exit_code=$?
+      metadata=$(cat "$output" 2>/dev/null)
+      rm -f "$output"
+      [ "$exit_code" -eq 0 ] && printf '%s' "$metadata"
+      return "$exit_code"
+    fi
+    sleep 0.05
+  done
+  stop_process_bounded "$pid"
+  rm -f "$output"
+  return 1
 }
 
 # Codex auth metadata is enough to notice an active-account change without
@@ -424,7 +460,7 @@ codex_direct_auth_metadata() {
     digest=$(printf '%s' "$canonical_home" | shasum -a 256 | awk '{print $1}')
     if [ -n "$digest" ]; then
       keychain_account="cli|${digest:0:16}"
-      if keychain_metadata=$(security find-generic-password -s "Codex Auth" -a "$keychain_account" 2>/dev/null); then
+      if keychain_metadata=$(bounded_security_metadata "$keychain_account"); then
         metadata_hash=$(printf '%s' "$keychain_metadata" | shasum -a 256 | awk '{print $1}')
         [ -n "$metadata_hash" ] && printf 'keychain:%s' "$metadata_hash"
         return
@@ -455,8 +491,7 @@ codex_login_status_metadata() {
     fi
     sleep 0.05
   done
-  kill "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
+  stop_process_bounded "$pid"
   rm -f "$output"
   return 1
 }
@@ -505,14 +540,15 @@ refresh_codex_auth_state() {
 }
 
 trigger_codex_auth_probe() {
-  local state_mtime state_age
+  local attempt_mtime attempt_age
   [ "$rate_limit_provider" = "codex" ] || return 0
   [ -n "$(codex_direct_auth_metadata)" ] && return 0
-  if [ -f "$auth_state_file" ]; then
-    state_mtime=$(file_mtime "$auth_state_file")
-    [ -n "$state_mtime" ] && state_age=$(($(date +%s) - state_mtime))
-    [ -n "${state_age:-}" ] && [ "$state_age" -lt "$codex_auth_probe_ttl" ] && return 0
+  if [ -f "$auth_attempt_file" ]; then
+    attempt_mtime=$(file_mtime "$auth_attempt_file")
+    [ -n "$attempt_mtime" ] && attempt_age=$(($(date +%s) - attempt_mtime))
+    [ -n "${attempt_age:-}" ] && [ "$attempt_age" -lt "$codex_auth_probe_ttl" ] && return 0
   fi
+  : >"$auth_attempt_file" 2>/dev/null
   (refresh_codex_auth_state >/dev/null 2>&1 &) >/dev/null 2>&1
 }
 
