@@ -146,7 +146,9 @@ cat >"$FAKE_BIN/codex" <<'EOF'
 #!/usr/bin/env bash
 if [ "$*" = "login status" ]; then
   [ -n "${FAKE_CODEX_LOGIN_SLEEP:-}" ] && sleep "$FAKE_CODEX_LOGIN_SLEEP"
-  if [ "${FAKE_CODEX_LOGIN_STATUS:-logged-in}" = "logged-out" ]; then
+  login_state="${FAKE_CODEX_LOGIN_STATUS:-logged-in}"
+  [ -f "${FAKE_CODEX_LOGIN_STATUS_FILE:-}" ] && login_state=$(cat "$FAKE_CODEX_LOGIN_STATUS_FILE")
+  if [ "$login_state" = "logged-out" ]; then
     printf '%s\n' 'Not logged in' >&2
     exit 1
   fi
@@ -165,6 +167,10 @@ while IFS= read -r line; do
     case "${FAKE_CODEX_MODE:-success}" in
     fail) exit 1 ;;
     slow) sleep "${FAKE_CODEX_SLEEP:-0.5}" ;;
+    ignore-term)
+      trap '' TERM
+      while :; do sleep 0.1; done
+      ;;
     rpc-error)
       jq -cn '{id: 2, error: {code: -32000, message: "authentication required"}}'
       continue
@@ -438,6 +444,20 @@ sleep 0.2
 second_error_fetches=$(grep -c '^argv' "$CODEX_LOG" || true)
 equals "Codex failure backoff suppresses repeated app-server starts" "$second_error_fetches" "$first_error_fetches"
 
+term_cache="$WORK/codex-ignore-term"
+FAKE_CODEX_MODE=ignore-term STATUSLINE_CODEX_TIMEOUT=1 \
+  run_statusline codex "$term_cache" "$base_payload" >/dev/null
+if wait_for_file "$term_cache/statusline-codex-refresh-failed"; then
+  ok "Codex deadline escalates an ignored SIGTERM and completes refresh"
+else
+  no "Codex process ignored termination beyond the bounded deadline"
+fi
+if wait_for_absent "$term_cache/statusline-codex-refresh.lock"; then
+  ok "forced app-server termination releases the refresh lock"
+else
+  no "forced app-server termination left the refresh lock behind"
+fi
+
 failure_auth_home="$WORK/codex-failure-auth-home"
 mkdir -p "$failure_auth_home"
 printf '{}\n' >"$failure_auth_home/auth.json"
@@ -484,13 +504,11 @@ auth_race_home="$WORK/codex-auth-race-home"
 mkdir -p "$auth_race_home"
 printf '{}\n' >"$auth_race_home/auth.json"
 auth_race_cache="$WORK/codex-auth-race"
-FAKE_CODEX_MODE=slow FAKE_CODEX_SLEEP=0.5 CODEX_HOME="$auth_race_home" \
-  run_statusline codex "$auth_race_cache" "$base_payload" >/dev/null
-for _ in {1..100}; do
-  auth_race_owner=$(printf '%s\n' "$auth_race_cache"/statusline-codex-refresh.lock/owner-* 2>/dev/null)
-  [ -e "$auth_race_owner" ] && break
-  sleep 0.05
-done
+auth_race_log="$WORK/codex-auth-race.log"
+: >"$auth_race_log"
+FAKE_CODEX_LOG="$auth_race_log" FAKE_CODEX_MODE=slow FAKE_CODEX_SLEEP=0.5 \
+  CODEX_HOME="$auth_race_home" run_statusline codex "$auth_race_cache" "$base_payload" >/dev/null
+wait_for_log "$auth_race_log" || true
 printf ' \n' >>"$auth_race_home/auth.json"
 wait_for_file "$auth_race_cache/statusline-codex-refresh-failed" || true
 if [ ! -f "$auth_race_cache/statusline-codex-usage-cache.json" ]; then
@@ -498,6 +516,31 @@ if [ ! -f "$auth_race_cache/statusline-codex-usage-cache.json" ]; then
 else
   no "auth change during fetch cached limits under the wrong account metadata"
 fi
+
+generic_race_home="$WORK/codex-generic-auth-race-home"
+mkdir -p "$generic_race_home"
+generic_status_file="$WORK/codex-generic-login-state"
+printf '%s\n' 'logged-in' >"$generic_status_file"
+export FAKE_CODEX_LOGIN_STATUS_FILE="$generic_status_file"
+generic_race_cache="$WORK/codex-generic-auth-race"
+generic_race_log="$WORK/codex-generic-auth-race.log"
+: >"$generic_race_log"
+FAKE_CODEX_LOG="$generic_race_log" FAKE_CODEX_MODE=slow FAKE_CODEX_SLEEP=0.5 \
+  CODEX_HOME="$generic_race_home" run_statusline codex "$generic_race_cache" "$base_payload" >/dev/null
+wait_for_log "$generic_race_log" || true
+printf '%s\n' 'logged-out' >"$generic_status_file"
+wait_for_absent "$generic_race_cache/statusline-codex-refresh.lock" || true
+if [ ! -f "$generic_race_cache/statusline-codex-usage-cache.json" ]; then
+  ok "generic-keyring logout during fetch discards old-account limits"
+else
+  no "generic-keyring logout cached the old account response"
+fi
+if [ ! -f "$generic_race_cache/statusline-codex-refresh-failed" ]; then
+  ok "auth mismatch does not back off the newly active account"
+else
+  no "auth mismatch recorded failure backoff for the new account"
+fi
+unset FAKE_CODEX_LOGIN_STATUS_FILE
 
 printf '%s\n' "[7] Keyring metadata switch and logout invalidation"
 keyring_home="$WORK/codex-keyring-home"
@@ -547,7 +590,7 @@ if wait_for_absent "$status_cache/statusline-codex-auth-refresh.lock"; then
 else
   no "logged-in auth probe left its single-flight lock behind"
 fi
-FAKE_CODEX_LOGIN_STATUS=logged-out STATUSLINE_CODEX_AUTH_PROBE_TTL=0 \
+FAKE_CODEX_LOGIN_STATUS=logged-out FAKE_CODEX_MODE=fail STATUSLINE_CODEX_AUTH_PROBE_TTL=0 \
   run_statusline codex "$status_cache" "$base_payload" >/dev/null
 logged_out_metadata=$(codex_login_metadata "Not logged in" 1)
 if wait_for_exact_file "$status_cache/statusline-codex-auth-metadata" "$logged_out_metadata"; then

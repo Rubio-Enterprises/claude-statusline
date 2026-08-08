@@ -563,7 +563,7 @@ fetch_codex() {
   command -v codex >/dev/null 2>&1 || return 1
 
   local timeout_seconds="${STATUSLINE_CODEX_TIMEOUT:-5}"
-  local scratch fifo output server_pid deadline initialized=false response=""
+  local scratch fifo output server_pid deadline stop_tick initialized=false response=""
   scratch="${cache_dir}/codex-fetch.$$.${RANDOM}"
   fifo="${scratch}.in"
   output="${scratch}.out"
@@ -603,6 +603,13 @@ fetch_codex() {
   done
   if kill -0 "$server_pid" 2>/dev/null; then
     kill "$server_pid" 2>/dev/null
+    for ((stop_tick = 0; stop_tick < 5; stop_tick++)); do
+      kill -0 "$server_pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    if kill -0 "$server_pid" 2>/dev/null; then
+      kill -KILL "$server_pid" 2>/dev/null
+    fi
   fi
   wait "$server_pid" 2>/dev/null
   rm -f "$fifo" "$output"
@@ -652,8 +659,12 @@ refresh_singleflight() {
     return 1
   }
 
-  local resp cache_payload auth_metadata auth_before="" auth_after="" refresh_succeeded=false
-  [ "$rate_limit_provider" = "codex" ] && auth_before=$(codex_direct_auth_metadata)
+  local resp cache_payload auth_metadata auth_before="" auth_after=""
+  local refresh_succeeded=false auth_changed_during_fetch=false
+  if [ "$rate_limit_provider" = "codex" ]; then
+    auth_before=$(codex_direct_auth_metadata)
+    [ -z "$auth_before" ] && auth_before=$(codex_login_status_metadata)
+  fi
   resp=$(fetch_provider)
   case "$rate_limit_provider" in
   claude)
@@ -663,22 +674,22 @@ refresh_singleflight() {
     ;;
   codex)
     auth_after=$(codex_direct_auth_metadata)
-    if { [ -n "$auth_before" ] || [ -n "$auth_after" ]; } &&
-      [ "$auth_before" != "$auth_after" ]; then
+    if [ -z "$auth_after" ]; then
+      auth_after=$(codex_login_status_metadata)
+      [ -n "$auth_after" ] && write_codex_auth_state_atomic "$auth_after"
+    fi
+    if [ "$auth_before" != "$auth_after" ]; then
+      auth_changed_during_fetch=true
       resp=""
     fi
     if [ -n "$resp" ] && echo "$resp" |
       jq -e '(.rateLimits != null) or ((.rateLimitsByLimitId // {}) | length > 0)' >/dev/null 2>&1; then
       auth_metadata="$auth_after"
-      if [ -z "$auth_metadata" ]; then
-        auth_metadata=$(codex_login_status_metadata)
-        [ -n "$auth_metadata" ] && write_codex_auth_state_atomic "$auth_metadata"
-      fi
       cache_payload=$(jq -cn --arg authMetadata "$auth_metadata" --argjson data "$resp" \
         '{authMetadata: $authMetadata, data: $data}')
       write_cache_atomic "$cache_payload" && refresh_succeeded=true
     fi
-    if $refresh_succeeded; then
+    if $refresh_succeeded || $auth_changed_during_fetch; then
       rm -f "$failure_file" 2>/dev/null
     else
       write_codex_failure_marker
