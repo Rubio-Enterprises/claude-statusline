@@ -75,6 +75,15 @@ wait_for_codex_pct() {
   done
   return 1
 }
+wait_for_exact_file() {
+  local path="$1" expected="$2" i actual
+  for ((i = 0; i < 100; i++)); do
+    actual=$(cat "$path" 2>/dev/null)
+    [ "$actual" = "$expected" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
 file_metadata() {
   stat -c '%Y:%s:%i' "$1" 2>/dev/null || stat -f '%m:%z:%i' "$1" 2>/dev/null
 }
@@ -318,6 +327,15 @@ write_codex_cache "$resetless_cache" "" "$resetless"
 resetless_rendered=$(run_statusline codex "$resetless_cache" "$base_payload" | strip_ansi)
 has "weekly Codex usage renders without reset metadata" "$resetless_rendered" "gen."
 has "resetless Codex bucket keeps its percentage" "$resetless_rendered" "57%"
+spark_id_only="$WORK/spark-id-only.json"
+cat >"$spark_id_only" <<EOF
+{"rateLimits":{"limitId":"legacy","primary":null},"rateLimitsByLimitId":{"codex-spark":{"limitId":"codex-spark","limitName":null,"primary":{"usedPercent":46,"windowDurationMins":10080,"resetsAt":$far}}}}
+EOF
+spark_id_cache="$WORK/codex-spark-id"
+write_codex_cache "$spark_id_cache" "" "$spark_id_only"
+spark_id_rendered=$(run_statusline codex "$spark_id_cache" "$base_payload" | strip_ansi)
+has "Spark bucket falls back to its metered cache key" "$spark_id_rendered" "spark."
+has "Spark ID fallback keeps its weekly percentage" "$spark_id_rendered" "46%"
 irrelevant="$WORK/irrelevant.json"
 cat >"$irrelevant" <<EOF
 {"rateLimits":{"limitId":"codex","primary":{"usedPercent":51,"windowDurationMins":300,"resetsAt":$far}},"rateLimitsByLimitId":{"other":{"limitId":"other","limitName":"Other","primary":{"usedPercent":52,"windowDurationMins":10080,"resetsAt":$far}}}}
@@ -433,6 +451,25 @@ auth_refreshed=$(CODEX_HOME="$auth_home" run_statusline codex "$auth_cache" "$ba
 has "refreshed active account cache is rendered" "$auth_refreshed" "gen."
 has "refreshed active account percentage replaces old account" "$auth_refreshed" "44%"
 
+auth_race_home="$WORK/codex-auth-race-home"
+mkdir -p "$auth_race_home"
+printf '{}\n' >"$auth_race_home/auth.json"
+auth_race_cache="$WORK/codex-auth-race"
+FAKE_CODEX_MODE=slow FAKE_CODEX_SLEEP=0.5 CODEX_HOME="$auth_race_home" \
+  run_statusline codex "$auth_race_cache" "$base_payload" >/dev/null
+for _ in {1..100}; do
+  auth_race_owner=$(printf '%s\n' "$auth_race_cache"/statusline-codex-refresh.lock/owner-* 2>/dev/null)
+  [ -e "$auth_race_owner" ] && break
+  sleep 0.05
+done
+printf ' \n' >>"$auth_race_home/auth.json"
+wait_for_file "$auth_race_cache/statusline-codex-refresh-failed" || true
+if [ ! -f "$auth_race_cache/statusline-codex-usage-cache.json" ]; then
+  ok "auth changes during fetch discard the mismatched response"
+else
+  no "auth change during fetch cached limits under the wrong account metadata"
+fi
+
 printf '%s\n' "[7] Keyring metadata switch and logout invalidation"
 keyring_home="$WORK/codex-keyring-home"
 mkdir -p "$keyring_home"
@@ -471,17 +508,24 @@ status_cache="$WORK/codex-login-status"
 write_codex_cache "$status_cache" "" "$response"
 STATUSLINE_CODEX_AUTH_PROBE_TTL=0 run_statusline codex "$status_cache" "$base_payload" >/dev/null
 logged_in_metadata=$(codex_login_metadata)
-for _ in {1..100}; do
-  [ "$(cat "$status_cache/statusline-codex-auth-metadata" 2>/dev/null)" = "$logged_in_metadata" ] && break
-  sleep 0.05
-done
+if wait_for_exact_file "$status_cache/statusline-codex-auth-metadata" "$logged_in_metadata"; then
+  ok "detached login-status probe records logged-in state"
+else
+  no "detached login-status probe did not record logged-in state"
+fi
+if wait_for_absent "$status_cache/statusline-codex-auth-refresh.lock"; then
+  ok "logged-in auth probe releases its single-flight lock"
+else
+  no "logged-in auth probe left its single-flight lock behind"
+fi
 FAKE_CODEX_LOGIN_STATUS=logged-out STATUSLINE_CODEX_AUTH_PROBE_TTL=0 \
   run_statusline codex "$status_cache" "$base_payload" >/dev/null
 logged_out_metadata=$(codex_login_metadata "Not logged in" 1)
-for _ in {1..100}; do
-  [ "$(cat "$status_cache/statusline-codex-auth-metadata" 2>/dev/null)" = "$logged_out_metadata" ] && break
-  sleep 0.05
-done
+if wait_for_exact_file "$status_cache/statusline-codex-auth-metadata" "$logged_out_metadata"; then
+  ok "detached login-status probe records logged-out state"
+else
+  no "detached login-status probe did not record logged-out state"
+fi
 status_logout=$(FAKE_CODEX_LOGIN_STATUS=logged-out FAKE_CODEX_MODE=fail \
   run_statusline codex "$status_cache" "$base_payload" | strip_ansi)
 lacks "detached login-status probe invalidates keyring cache on logout" "$status_logout" "gen."
@@ -527,6 +571,22 @@ wait_for_file "$singleflight_cache/statusline-codex-usage-cache.json" || true
 wait_for_absent "$singleflight_cache/statusline-codex-refresh.lock" || true
 fetch_count=$(grep -c '^argv' "$singleflight_log" || true)
 equals "concurrent cold renders launch one Codex app-server" "$fetch_count" "1"
+
+stale_lock_cache="$WORK/codex-stale-lock"
+mkdir -p "$stale_lock_cache/statusline-codex-refresh.lock"
+stale_owner="$stale_lock_cache/statusline-codex-refresh.lock/owner-interrupted"
+: >"$stale_owner"
+STATUSLINE_LOCK_MAXAGE=0 run_statusline codex "$stale_lock_cache" "$base_payload" >/dev/null
+if wait_for_file "$stale_lock_cache/statusline-codex-usage-cache.json"; then
+  ok "stale owner marker is reclaimed with globbing disabled"
+else
+  no "stale owner marker permanently blocked refresh"
+fi
+if [ ! -e "$stale_owner" ]; then
+  ok "stale owner marker cleanup removes the interrupted owner"
+else
+  no "stale owner marker survived lock reclamation"
+fi
 
 printf '%s\n' "[9] Shared stale/reset policy preserves fresh Claude stdin"
 claude_stale_cache="$WORK/claude-stale"

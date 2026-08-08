@@ -610,6 +610,7 @@ fetch_provider() {
 # Returns 0 if THIS process did the refresh; 1 if another holds a live lock.
 refresh_singleflight() {
   local lock_token owner_marker stale_marker="" now lmtime lock_age
+  local -a stale_markers
   lock_token="${BASHPID:-$$}-${RANDOM}"
   owner_marker="${lock_dir}/owner-${lock_token}"
 
@@ -620,7 +621,10 @@ refresh_singleflight() {
     lock_age=$((now - lmtime))
     [ "$lock_age" -lt "$lock_maxage" ] && return 1
 
-    for stale_marker in "$lock_dir"/owner-*; do
+    set +f
+    stale_markers=("$lock_dir"/owner-*)
+    set -f
+    for stale_marker in "${stale_markers[@]}"; do
       [ -e "$stale_marker" ] || stale_marker=""
       break
     done
@@ -634,7 +638,8 @@ refresh_singleflight() {
     return 1
   }
 
-  local resp cache_payload auth_metadata refresh_succeeded=false
+  local resp cache_payload auth_metadata auth_before="" auth_after="" refresh_succeeded=false
+  [ "$rate_limit_provider" = "codex" ] && auth_before=$(codex_direct_auth_metadata)
   resp=$(fetch_provider)
   case "$rate_limit_provider" in
   claude)
@@ -643,9 +648,14 @@ refresh_singleflight() {
     fi
     ;;
   codex)
+    auth_after=$(codex_direct_auth_metadata)
+    if { [ -n "$auth_before" ] || [ -n "$auth_after" ]; } &&
+      [ "$auth_before" != "$auth_after" ]; then
+      resp=""
+    fi
     if [ -n "$resp" ] && echo "$resp" |
       jq -e '(.rateLimits != null) or ((.rateLimitsByLimitId // {}) | length > 0)' >/dev/null 2>&1; then
-      auth_metadata=$(codex_direct_auth_metadata)
+      auth_metadata="$auth_after"
       if [ -z "$auth_metadata" ]; then
         auth_metadata=$(codex_login_status_metadata)
         [ -n "$auth_metadata" ] && write_codex_auth_state_atomic "$auth_metadata"
@@ -793,7 +803,10 @@ elif [ "$rate_limit_provider" = "codex" ] && [ -n "$cache_data" ]; then
        | .[0]);
     buckets as $buckets
     | (first($buckets[] | select(.cacheKey == "codex" or .limitId == "codex")) // null) as $general
-    | (first($buckets[] | select((.limitName // "" | ascii_downcase | contains("spark")))) // null) as $spark
+    | (first($buckets[] | select(
+         ((.limitName // "") | ascii_downcase | contains("spark"))
+         or ((.cacheKey // "") | ascii_downcase | contains("spark"))
+         or ((.limitId // "") | ascii_downcase | contains("spark")))) // null) as $spark
     | [
         (weekly($general) as $window
          | select($window != null)
