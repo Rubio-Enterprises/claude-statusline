@@ -17,7 +17,7 @@ has_codex_plugin: false
 has_go: false
 has_homebrew_formulae: false
 has_javascript: true
-has_playwright: true
+has_playwright: false
 has_python: false
 has_rust: false
 has_swift: false

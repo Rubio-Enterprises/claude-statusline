@@ -115,15 +115,3 @@ run = ["npm run test"]
 [tasks.build]
 description = "Delegates to scripts.build in package.json"
 run = ["npm run build"]
-[tasks.e2e-setup]
-# `--with-deps` only where passwordless sudo exists (hosted runners). The
-# self-hosted glue pool runs no-new-privileges containers with the browser OS
-# deps baked into the image (mac-dev-playbook docker/glue-runner/Dockerfile),
-# so a plain `playwright install` (browser binaries, user dir, no sudo) is
-# both sufficient and the only form that works there.
-description = "Install Playwright browsers (+ OS deps where sudo exists)"
-run = ["if sudo -n true 2>/dev/null; then npx playwright install --with-deps; else npx playwright install; fi"]
-
-[tasks.e2e]
-description = "Delegates to scripts.e2e in package.json (consumers wrap dev-server setup, base URL, etc. — the template's invocation contract is just 'mise run e2e')"
-run = ["npm run e2e"]
