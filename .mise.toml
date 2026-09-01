@@ -62,13 +62,13 @@ node = "22.12.0"
 # standalone ts-* repo (e.g. vibetunnel Swift + Node, todoist-classify Python +
 # React/JSX).
 #
-# Note for ts-web-angular: the template pins Biome and renders `biome.json`
+# Note for ts-web-angular: the template pins Biome and renders `biome.jsonc`
 # uniformly with ts-web. The audit-side override-policy Rego rule that "scripts.lint
 # invokes biome" is relaxed for Angular repos (policy/typescript/overrides.rego's
 # `is_angular_repo` bypass) so consumers running `ng lint` still pass — but the
-# template no longer withholds biome.json from Angular consumers who legitimately
+# template no longer withholds biome.jsonc from Angular consumers who legitimately
 # want Biome alongside ESLint (e.g. super-productivity's `scripts.lint: "biome
-# check ."`). Consumers who don't want Biome can delete biome.json; `_skip_if_exists`
+# check ."`). Consumers who don't want Biome can delete biome.jsonc; `_skip_if_exists`
 # keeps it from coming back on `copier update`.
 "npm:@biomejs/biome"       = "2.5.5"
 
@@ -79,6 +79,18 @@ node = "22.12.0"
 # it therefore activates hooks for developers who never activate mise.
 [hooks]
 postinstall = "mise exec -- lefthook install"
+
+# Regenerate the GENERATED lint configs (floor ⊕ this repo's `*.local`
+# sidecars) without a full `copier update`. Universal rather than facet-gated:
+# every onboarded repo carries `.yamllint` + `.markdownlint-cli2.jsonc`, and the
+# stack facets add `ruff.toml` / `biome.jsonc` on top.
+#
+# Invoked through `bash` rather than the script's own exec bit: copier strips
+# exec bits from rendered files (see the chmod-claude-scripts.sh rationale in
+# copier.yml's `_tasks` block), so relying on it would break on a fresh render.
+[tasks.lint-config]
+description = "Regenerate generated lint configs from the standards floor + this repo's *.local sidecars"
+run = ["bash scripts/regenerate-lint-config.sh"]
 # TS archetypes: tasks delegate to package.json scripts (the consumer owns
 # package.json per Pattern A/D / _skip_if_exists). The audit Layer B JSON
 # Schema enforces that lint, test, e2e exist in scripts; this contract makes
