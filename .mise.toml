@@ -72,13 +72,17 @@ node = "22.12.0"
 # keeps it from coming back on `copier update`.
 "npm:@biomejs/biome"       = "2.5.5"
 
-# Git hooks are per-repo via lefthook since dotfiles commit 2ea15ce
-# decommissioned the global ~/.config/git/hooks dispatcher. Nothing else runs
-# `lefthook install`, so a fresh clone silently has no hooks. `postinstall`
-# runs after `mise install` without requiring `mise activate`; unlike `enter`,
-# it therefore activates hooks for developers who never activate mise.
+# Git hooks are per-repo via lefthook since dotfiles commit 2ea15ce retired the
+# global dispatcher. Local `mise install` activates them without `mise
+# activate`. CI never fires Git hooks; `lint-hooks` runs `lefthook run` with a
+# routed standards token. Ungated CI clones the private standards remote
+# anonymously, and macOS Tart GCM can wait forever (sshfsctl PR #18, run
+# 33554743280, 2026-09-01). Precedents: the v1.55.2-wave fix in
+# Rubio-Enterprises/.github lint-hooks.yml and mac-dev-playbook
+# config_outrunner.cue #295. Linux hid it because mise only warns on hook
+# failure.
 [hooks]
-postinstall = "mise exec -- lefthook install"
+postinstall = 'test -n "${CI:-}" || mise exec -- lefthook install'
 
 # Regenerate the GENERATED lint configs (floor ⊕ this repo's `*.local`
 # sidecars) without a full `copier update`. Universal rather than facet-gated:
