@@ -2,6 +2,26 @@
 # Backend-prefixed pins (`npm:`, `aqua:`, `github:`) live here, not in .tool-versions.
 
 [tools]
+# uv — declared FIRST because the `pipx:` pins below cannot install without it
+# and every task in this file shells out to it (`uv lock --check`,
+# `uv run --frozen …`). mise's pipx backend routes installs through uvx
+# (`pipx.uvx` defaults true); with neither uv nor a real pipx binary present,
+# `mise install` hard-fails with "pipx is required to install pipx:<tool> but
+# was not found" and every downstream hook dies with command-not-found.
+#
+# Until 2026-09-03 this dependency was UNDECLARED: uv reached CI only via an
+# `astral-sh/setup-uv` step each workflow had to remember, and reached laptops
+# only via a developer's global install. That made green runs a property of the
+# runner image and the mise cache rather than of this file — 20 of 58 repos
+# carried a test-gate with no uv step, of which 4 were outright red and 16
+# passed only because they happened to land on a runner that already had it.
+# Declaring it here makes provisioning mise's job, so the workflow-level
+# setup-uv steps become belt-and-braces instead of load-bearing.
+#
+# Version tracks the pin the injected gates install (astral-sh/setup-uv v8.3.2
+# → uv 0.12.1); Renovate's mise manager bumps it here.
+uv = "0.12.1"
+
 # commitlint via mise's npm: backend so the binary lands on PATH across every
 # archetype. Earlier the template assumed TS consumers carried commitlint as a
 # package.json devDep, but Pattern E preserves the consumer's package.json

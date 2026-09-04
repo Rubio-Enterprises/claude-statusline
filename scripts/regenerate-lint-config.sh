@@ -31,6 +31,27 @@
 
 set -euo pipefail
 
+# Drop every repo-scoped git variable before doing anything else. Git EXPORTS
+# these to hook processes, and this script is one: the `lint-config` pre-commit
+# hook runs it. copier clones the template with git into a temp dir, and those
+# nested git invocations inherit the environment — so with `GIT_INDEX_FILE`
+# still set, the template checkout is written into THIS repo's index instead of
+# the clone's. The repo's index is replaced by the template's tree (302 entries
+# where there were 79, 6 of them standards' own `.claude/skills/run-standards/`
+# paths), and because copier deletes its temp clone the referenced blobs vanish
+# with it, so the next commit dies on `error: invalid object … Error building
+# trees` — which reads like repository corruption and is not. Reproduced and
+# fixed 2026-09-02 after it blocked two commits on claude-workflows#116;
+# recovery for an already-clobbered index is `git read-tree --reset HEAD`.
+#
+# Unsetting is safe here: every git/gh call this script (and every copier
+# `_tasks` script beneath it) needs resolves from the working directory, which
+# is the repo root by the check above. It is also the only correct scope — a
+# tool invoked from a hook must not hand its own repo context to a nested
+# checkout of a different repository.
+unset GIT_INDEX_FILE GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+
 CHECK_ONLY=0
 if [ "${1:-}" = "--check" ]; then
   CHECK_ONLY=1
@@ -119,6 +140,29 @@ $YQ 'with_entries(select(.key | test("^_") | not))' .copier-answers.yml >"$WORK/
 for sidecar in "${SIDECARS[@]}"; do
   if [ -f "$sidecar" ]; then
     cp "$sidecar" "$RENDER_DIR/$sidecar"
+  fi
+done
+
+# Seed the committed GENERATED configs too — including the legacy `biome.json`
+# name — so the template's divergence guards (migrate-ruff-detect-divergence.sh,
+# migrate-biome-detect-divergence.sh) see the same destination state a real
+# `copier update` sees, and reach the same verdict here as they do there.
+#
+# They must: a repo that owns a Pattern-D `biome.json` with no
+# `biome.json.local` is UNCONVERTED, and the guard drops the floor fragment for
+# it at render time, leaving the consumer's own config in charge. Rendering into
+# a dir that held none of that made the guard see a greenfield destination, keep
+# the fragment, and emit a floor `biome.jsonc` the repo does not (and must not)
+# commit — reported as permanently STALE, with no commit able to satisfy it,
+# since writing that file would produce a config `biome.json` then beats in
+# biome's own resolution order. It bit exactly the unconverted repos that also
+# carry some OTHER sidecar, because the hook's glob fires on any sidecar and
+# then checks all four configs (claude-lsps#159, yaml-static-webpage-template#148,
+# 2026-09-02); unconverted repos with no sidecar at all never fired it and so
+# looked fine.
+for cfg in "${CONFIGS[@]}" biome.json; do
+  if [ -f "$cfg" ]; then
+    cp "$cfg" "$RENDER_DIR/$cfg"
   fi
 done
 
