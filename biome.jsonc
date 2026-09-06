@@ -30,8 +30,7 @@
       "style": {
         "useImportType": "error",
         "useNodejsImportProtocol": "error"
-      },
-      "recommended": true
+      }
     }
   },
   "assist": {
