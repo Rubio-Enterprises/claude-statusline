@@ -1,4 +1,4 @@
 {
   "name": "claude-statusline",
-  "image": "ghcr.io/rubio-enterprises/agent-workspace:main@sha256:f0f5deb88a73081db9512da04c880590d29591293aba496715f68c5b116da695"
+  "image": "ghcr.io/rubio-enterprises/agent-workspace:main@sha256:f8db82d77ab94ca93aa4380a5b4aba5eb379aa0d1d440e4478a61a4c395d22dc"
 }
