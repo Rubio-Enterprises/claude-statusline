@@ -20,6 +20,9 @@ excludes = [
   "{,**/}mise.lock",
   "{,**/}modify_*",
   "*.tmpl",
+  # Xcode rewrites asset-catalog manifests in its own JSON style on every
+  # edit; formatting them would make Xcode and Biome undo each other.
+  "*.xcassets/{,**/}Contents.json",
   ".github/actions/**/action.yml",
   ".copier-answers.yml",
 ]
